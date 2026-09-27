@@ -137,6 +137,164 @@ export async function describe(schema) {
     }
 }
 
+// ---------------------------------------------------------------------
+// The description saved with the node
+//
+// The fields are drawn from the server's description of the schema, and
+// a loaded workflow used to wait for it: the answer comes back in a few
+// ms, but the browser is busy building the rest of the workflow and only
+// reads it once the whole load is done -- so every preset node showed up
+// empty and filled in last. The node now keeps the last description in
+// its properties, keyed by the schema text, and a load whose schema
+// matches builds from it at once; the server is still asked, and a
+// different answer rebuilds the node.
+//
+// What is kept is only what does not depend on the machine. A borrowed
+// dropdown's list (and a default taken from it, and the note that the
+// written default is not in it) is this machine's -- the author's model
+// and LoRA file names -- so none of it goes into a shared workflow: the
+// list is read from the browser's own node definitions at load, and the
+// default and the note are worked out from it the way the server does
+// (presets.py Field.default / default_missing / describe).
+// ---------------------------------------------------------------------
+
+const DESC_PROP = "obvpm_schema_desc";
+
+/** A short key for a schema text: FNV-1a over it, and its length. */
+function schemaKey(text) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < text.length; i++) {
+        h ^= text.charCodeAt(i);
+        h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return h.toString(16).padStart(8, "0") + ":" + text.length;
+}
+
+/** The part of an answer that may be saved, or null (an answer with an
+ *  error is not kept: the next load asks again). */
+function portableDescription(answer) {
+    if (!answer || answer.error || !Array.isArray(answer.fields)) return null;
+    if (answer.fields.some((f) => f.error)) return null;
+    return answer.fields.map((f) => {
+        if (!f.ref) return f;
+        const { choices, default: _d, hint, ...rest } = f;
+        // the schema's own hint, without the local "not in this list" note
+        return { ...rest, hint: String(hint ?? "").split("\n\nThe schema's default, ")[0] };
+    });
+}
+
+/** JSON with object keys sorted: two answers compared by content. */
+function canonical(value) {
+    return JSON.stringify(value, (_k, v) => (v && typeof v === "object" && !Array.isArray(v)
+        ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, v[k]])) : v));
+}
+
+/** Python's repr of a str, as `%r` writes it in the server's note. */
+function pyRepr(text) {
+    const s = String(text);
+    const q = s.includes("'") && !s.includes('"') ? '"' : "'";
+    const body = s.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\r/g, "\\r")
+        .replace(/\t/g, "\\t").split(q).join("\\" + q);
+    return q + body + q;
+}
+
+/** A borrowed list from the browser's node definitions (ref_choices). */
+function localChoices(ref) {
+    const text = String(ref ?? "");
+    const dot = text.indexOf(".");
+    if (dot < 0) return null;
+    const nodeName = text.slice(0, dot).trim();
+    const inputName = text.slice(dot + 1).trim();
+    const def = LiteGraph.registered_node_types?.[nodeName]?.nodeData;
+    const input = def?.input;
+    const spec = input?.required?.[inputName] ?? input?.optional?.[inputName];
+    if (!spec) return null;
+    if (Array.isArray(spec[0])) return spec[0];
+    const options = spec[1]?.options;
+    return Array.isArray(options) ? options : null;
+}
+
+/** The saved description with this machine's parts put back, as an
+ *  answer buildFields takes; null when it cannot be (the server decides). */
+function savedAnswer(node, schema) {
+    const saved = node.properties?.[DESC_PROP];
+    if (!saved || saved.key !== schemaKey(schema)) return null;
+    let fields;
+    try {
+        fields = JSON.parse(saved.json);
+    } catch (err) {
+        return null;
+    }
+    if (!Array.isArray(fields)) return null;
+    const out = [];
+    for (const f of fields) {
+        if (!f || typeof f !== "object" || typeof f.name !== "string") return null;
+        if (!f.ref) {
+            out.push(f);
+            continue;
+        }
+        const choices = localChoices(f.ref);
+        if (!choices) return null;
+        const written = String(f.default_text ?? "");
+        const hit = written ? choices.find((c) => String(c) === written) : undefined;
+        const fallback = choices.length ? choices[0]
+            : ({ int: 0, float: 0.0, bool: false }[f.kind] ?? "");
+        let hint = String(f.hint ?? "");
+        if (written && hit === undefined && choices.length) {
+            hint = (hint ? hint + "\n\n" : "") + "The schema's default, "
+                + pyRepr(written) + ", is not in this list here, so the field "
+                + "starts on the first entry.";
+        }
+        out.push({ ...f, choices, default: hit !== undefined ? hit : fallback, hint });
+    }
+    return { fields: out };
+}
+
+/** Keep the answer with the node, when it can be kept. */
+function saveDescription(node, schema, answer) {
+    const fields = portableDescription(answer);
+    if (!fields) return;
+    const next = { key: schemaKey(schema), json: JSON.stringify(fields) };
+    const now = node.properties?.[DESC_PROP];
+    if (now?.key === next.key && now?.json === next.json) return;
+    node.properties ??= {};
+    node.properties[DESC_PROP] = next;
+}
+
+/**
+ * A loaded node: build from the saved description now, then check it
+ * with the server. True when it built.
+ */
+function buildFromSaved(node) {
+    const schema = String(widget(node, SCHEMA)?.value ?? "");
+    if (!schema.trim() || !isLive(node)) return false;
+    const answer = savedAnswer(node, schema);
+    if (!answer) return false;
+    node.__obvpmBuilt = schema;
+    try {
+        buildFields(node, answer);
+    } catch (err) {
+        node.__obvpmBuilt = null;
+        trace(node, "saved-build-threw", String(err?.stack ?? err));
+        return false;
+    }
+    trace(node, "built", "from the saved description, "
+          + answer.fields.length + " fields");
+    const used = canonical(answer.fields);
+    void (async () => {
+        const fresh = await describe(schema);
+        if (node.__obvpmRemoved || !isLive(node)) return;
+        if (String(widget(node, SCHEMA)?.value ?? "") !== schema) return;  // edited meanwhile
+        if (node.__obvpmBuilt !== schema || fresh?.error) return;
+        if (canonical(fresh.fields) === used) return;
+        // this machine's server says otherwise: its answer wins
+        trace(node, "saved-differs", "rebuilding from the server's answer");
+        buildFields(node, fresh);
+        saveDescription(node, schema, fresh);
+    })();
+    return true;
+}
+
 /**
  * Build one widget for one field.
  *
@@ -511,6 +669,10 @@ app.registerExtension({
                 // after the paste has finished adding its nodes
                 setTimeout(() => joinGroup(node), 0);
             }
+            // the fields at once, from the description saved with the
+            // node (the server's answer would only be read once the
+            // whole workflow has loaded); rebuild then finds it built
+            buildFromSaved(this);
             void rebuild(this);
             // the user presets of the loaded node's Preset Type Id (a property, restored by now)
             void loadUserPresets(typeIdOf(this));
@@ -759,6 +921,7 @@ async function rebuild(node, force) {
     node.__obvpmBuilt = schema;
     try {
         buildFields(node, answer);
+        saveDescription(node, schema, answer);
         node.__obvpmBuildError = null;
         node.__obvpmFailedSchema = null;
         node.__obvpmFailures = 0;
