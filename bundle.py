@@ -90,6 +90,26 @@ class Bundle:
         return (packed,)
 
 
+class SchemaBundle(dict):
+    """A bundle that remembers the Value Presets schema it was resolved from.
+
+    To every node it is the plain {name: value} dict any bundle is. The
+    two attributes ride along for Override Bundle Values, which checks an
+    override exactly as the Value Presets node would (range, decimals,
+    choices) and applies the schema's `when` lines again -- turning a
+    deciding field on brings back the fields it hides, from the values
+    the preset node holds for them. An attribute rather than a key, so no
+    Unbundle, Peek or other consumer ever sees it.
+    """
+
+    __slots__ = ("obvpm_schema", "obvpm_values")
+
+    def __init__(self, packed=(), schema="", values=None):
+        super().__init__(packed)
+        self.obvpm_schema = str(schema or "")
+        self.obvpm_values = dict(values or {})
+
+
 def _as_bundle(bundle, node):
     """Bundles are plain {name: value} dicts -- anything else is a miswire."""
     if not isinstance(bundle, dict):

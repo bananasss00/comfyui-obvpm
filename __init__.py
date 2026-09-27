@@ -52,6 +52,7 @@ from .gates import (
 from .image import DownscaleImageToMegapixels
 from .pickers import LoraName, SamplerName, SchedulerName
 from .presets import ValuePresets
+from .overrides import OverrideBundleValues
 from . import presets as _presets
 from . import ids as _ids
 from .switches import (
@@ -86,6 +87,7 @@ NODE_CLASS_MAPPINGS = {
     "Unbundle (obvpm)": UnbundleAuto,
     "PeekBundle (obvpm)": BundlePeek,
     "ValuePresets (obvpm)": ValuePresets,
+    "OverrideBundleValues (obvpm)": OverrideBundleValues,
     "LoadImageCrop (obvpm)": LoadImageCrop,
     "LoadImagesCompose (obvpm)": LoadImagesCompose,
     "LoraName (obvpm)": LoraName,
@@ -116,6 +118,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Unbundle (obvpm)": "Unbundle",
     "PeekBundle (obvpm)": "Peek Bundle",
     "ValuePresets (obvpm)": "Value Presets",
+    "OverrideBundleValues (obvpm)": "Override Bundle Values",
     "LoadImageCrop (obvpm)": "Load Image & Crop",
     "LoadImagesCompose (obvpm)": "Load Images & Compose",
     "LoraName (obvpm)": "Lora Name",

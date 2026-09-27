@@ -180,7 +180,7 @@ function defaultTo(combo, valuesFn, node) {
  * `side` is "inputs" or "outputs" — outputs behave the same way, except a
  * link lives in `.links` rather than `.link`.
  */
-function syncSockets(node, side, prefix, labels, max) {
+export function syncSockets(node, side, prefix, labels, max) {
     const re = new RegExp(`^${prefix}(\\d+)$`);
     const linked = (slot) =>
         side === "inputs" ? slot.link != null : !!slot.links?.length;
@@ -269,7 +269,7 @@ function countSlots(node, side, prefix) {
  * its Set's feed, found the way the pair finds itself). Null when the
  * wire cannot be followed.
  */
-function bundleSourceFor(node, slotName, depth = 0) {
+export function bundleSourceFor(node, slotName, depth = 0) {
     if (depth >= 8) return null;
     // An Unbundle with "get" on has no socket: its wire is the constant,
     // and it continues at the setter carrying it.
@@ -327,7 +327,7 @@ function setterSource(setter, depth) {
  * does not come from a Bundle (a Value Presets node packs without
  * inputs, and a switch is stepped over by bundleNamesFor instead).
  */
-function packerOf(node, slotName, depth = 0) {
+export function packerOf(node, slotName, depth = 0) {
     const src = bundleSourceFor(node, slotName, depth);
     if (!src || depth >= 8) return null;
     const { node: origin, slot } = src;
@@ -1179,7 +1179,7 @@ function makeCompact(nodeType) {
  * `widget.hidden`, the Vue one `options.hidden`, and the zero height with
  * the -4 offset cancels the spacing the row would otherwise reserve.
  */
-function hideWidget(node, name) {
+export function hideWidget(node, name) {
     const w = widget(node, name);
     if (!w || w.hidden) return;
     try {

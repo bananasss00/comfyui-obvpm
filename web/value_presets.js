@@ -5,11 +5,16 @@ import { api } from "../../scripts/api.js";
 // at nothing. One implementation of that fix, and of the dialog kit and
 // palette (the bundle config and Load Images & Compose use them too).
 import { el, TEXT, TITLE, INK, DIM, EDGE, FILL, PANEL,
-         textBox, pushButton, openOverlay, askText, askConfirm, notice,
+         textBox, pushButton, openOverlay, askText, askConfirm, askChoice, askTextChoice, notice,
          dropWidgetSockets, themePalette, valueTooltip,
          NODE_BUTTON, NODE_BUTTON_HOVER } from "./obvpm_ui.js";
 import { trace, listenForPageErrors, loadStarted, loadFinished,
          reportText, copyText } from "./value_presets_diag.js";
+import { STAR, typeIdOf, cleanTypeId, isUserLabel, bareName,
+         userPresets, userPresetsError, loadUserPresets, saveUserPresets,
+         onUserPresetsChange, exportText, parseImport, mergePresets,
+         download } from "./value_presets_user.js";
+import { constantOn, setMode } from "./obvpm_constants.js";
 
 /**
  * Value Presets: a control per schema field, and named sets of them.
@@ -49,6 +54,8 @@ const PRESET = "preset";
 const VALUES = "values";
 const PRESETS = "presets";
 const NAMES = "names";
+// the constant's name, when "set by name" is on (obvpm_constants.js)
+const SET_W = "set";
 // Hidden on the node's face. The schema joins them: "edit schema…" is
 // the way in, and a multiline box of syntax sitting above the controls
 // is a second, worse one. It stays a real widget -- it is still the
@@ -99,7 +106,25 @@ function writeJson(node, name, value) {
  * text changed, so this runs on a schema edit and on the deliberate
  * rebuilds, not on the draw loop.
  */
-async function describe(schema) {
+/**
+ * Who wants to hear that a Value Presets node built its fields ("built")
+ * or had a value changed ("value"): Override Bundle Values
+ * (override_values.js), whose "overridden" mark on a field is lost when
+ * the widget is rebuilt, and whose rows show the bundle's own value.
+ */
+export const presetsListeners = new Set();
+
+function tell(node, what) {
+    for (const listener of presetsListeners) {
+        try {
+            listener(node, what);
+        } catch (err) {
+            console.error("[obvpm-presets] listener failed:", err);
+        }
+    }
+}
+
+export async function describe(schema) {
     try {
         const resp = await api.fetchApi("/obvpm/presets/schema", {
             method: "POST",
@@ -130,7 +155,7 @@ async function describe(schema) {
  * to the surviving state; the constructor argument does not). Without
  * the assignment, revert and preset-apply repaint nothing.
  */
-function fieldWidget(node, field, value, onChange) {
+export function fieldWidget(node, field, value, onChange) {
     const set = (v) => { onChange(field.name, v); };
     const shown = field.error ? field.name + "  ⚠" : field.name;
     let w, coerced;
@@ -293,7 +318,7 @@ function presetValue(node, saved, key) {
 function modifiedFields(node) {
     const name = selected(node);
     if (name === CUSTOM) return [];
-    const saved = readJson(node, PRESETS)[name];
+    const saved = lookupPreset(node, name);
     if (!saved || typeof saved !== "object") return [];
     const now = readJson(node, VALUES);
     // Over the CURRENT fields, not the preset's keys: a field added to
@@ -334,12 +359,74 @@ function refreshState(node) {
     node.__obvpmChanged = changed;
     paintButtonRow(node);
     node.setDirtyCanvas?.(true, true);
+    // after the labels are rewritten, so a listener's own mark on them
+    // (Override Bundle Values' "overridden") is put back on top
+    tell(node, "value");
 }
 
-function presetNames(node) {
-    return Object.keys(readJson(node, PRESETS)).sort(
-        (a, b) => a.localeCompare(b));
+const HIDDEN_PROP = "obvpm_presets_hidden";
+const TYPE_ID_PROP = "obvpm_presets_type_id";
+
+function hiddenPresets(node) {
+    // an array as written -- or the {"0": ...} object some frontends make
+    // of an array property -- so read the values either way
+    const h = node.properties?.[HIDDEN_PROP];
+    const list = Array.isArray(h) ? h
+        : h && typeof h === "object" ? Object.values(h) : [];
+    return new Set(list.map(String));
 }
+
+/**
+ * The chooser's list: the workflow's presets (minus the ones hidden in
+ * config -- except the one selected, so the chooser never shows a value
+ * it does not list), then the user presets, marked ★.
+ */
+function presetNames(node) {
+    const hidden = hiddenPresets(node);
+    const current = selected(node);
+    const own = Object.keys(readJson(node, PRESETS))
+        .filter((n) => !hidden.has(n) || n === current)
+        .sort((a, b) => a.localeCompare(b));
+    const lib = typeIdOf(node);
+    const mine = lib ? Object.keys(userPresets(lib))
+        .sort((a, b) => a.localeCompare(b)).map((n) => STAR + n)
+        .filter((label) => !hidden.has(label) || label === current) : [];
+    // the user's own first, then the workflow's
+    return [...mine, ...own];
+}
+
+/** A preset's stored values by its chooser label: the workflow's, or the
+ *  user presets for a ★ label. */
+function lookupPreset(node, label) {
+    if (isUserLabel(label)) {
+        const lib = typeIdOf(node);
+        return lib ? userPresets(lib)[bareName(label)] : undefined;
+    }
+    return readJson(node, PRESETS)[label];
+}
+
+/** Every Value Presets node, in every graph, with Preset Type Id `name`. */
+function nodesUsingTypeId(name) {
+    const out = [];
+    const walk = (g, level) => {
+        if (!g || level > 8) return;
+        for (const n of g._nodes ?? g.nodes ?? []) {
+            if (n.type === NODE && typeIdOf(n) === name) out.push(n);
+            if (n.subgraph) walk(n.subgraph, level + 1);
+        }
+    };
+    walk(app.graph ?? app.rootGraph, 0);
+    return out;
+}
+
+// user presets that load or change: its nodes' choosers and "modified"
+// state follow (the chooser reads the list live; only the labels and the
+// button row need a refresh)
+onUserPresetsChange((name) => {
+    for (const node of nodesUsingTypeId(name)) {
+        if (node.__obvpmFieldMap) refreshState(node);
+    }
+});
 
 function selected(node) {
     return String(widget(node, PRESET)?.value ?? CUSTOM);
@@ -398,6 +485,10 @@ app.registerExtension({
         const added = nodeType.prototype.onAdded;
         nodeType.prototype.onAdded = function () {
             this.__obvpmRemoved = false;        // put back: live again
+            // pasted? (a load configures with app.configuringGraph set; a
+            // paste configures right after adding, with it clear)
+            this.__obvpmJustAdded = true;
+            setTimeout(() => { this.__obvpmJustAdded = false; }, 0);
             return added?.apply(this, arguments);
         };
 
@@ -415,7 +506,14 @@ app.registerExtension({
                   + JSON.stringify(saved?.[1] ?? null) + ", widgets_values "
                   + (Array.isArray(saved) ? saved.length : "none"));
             const r = configure?.apply(this, arguments);
+            if (this.__obvpmJustAdded && !app.configuringGraph) {
+                const node = this;
+                // after the paste has finished adding its nodes
+                setTimeout(() => joinGroup(node), 0);
+            }
             void rebuild(this);
+            // the user presets of the loaded node's Preset Type Id (a property, restored by now)
+            void loadUserPresets(typeIdOf(this));
             watch(this);
             return r;
         };
@@ -436,12 +534,74 @@ app.registerExtension({
         const draw = nodeType.prototype.onDrawForeground;
         nodeType.prototype.onDrawForeground = function (...args) {
             void rebuild(this);
+            syncConstantRow(this);
             return draw?.apply(this, args);
         };
     },
 });
 
+// While "set to constant" is on, the node's LAST field (just above the
+// buttons) is `set_constant`: the name other nodes get this bundle by.
+// Not the declared `set` widget itself -- widgets_values is positional
+// on older frontends, so that one stays where it was declared (hidden)
+// and this field, never serialized, writes through to it, which runs
+// the setter's own rename handling (obvpm_constants.js asks this node to
+// show the name its own way).
+const CONST_ROW = "set_constant";
+
+/** Put the field last among the fields: just above the button row. */
+function placeConstantRow(node) {
+    const row = widget(node, CONST_ROW);
+    if (!row) return;
+    node.widgets.splice(node.widgets.indexOf(row), 1);
+    const bar = node.__obvpmRow?.widget;
+    const at = bar ? node.widgets.indexOf(bar) : -1;
+    if (at >= 0) node.widgets.splice(at, 0, row);
+    else node.widgets.push(row);
+}
+
+function showConstantRow(node, show) {
+    const real = widget(node, SET_W);
+    let row = widget(node, CONST_ROW);
+    if (!show || !real) {
+        if (row) {
+            row.onRemove?.();
+            node.widgets.splice(node.widgets.indexOf(row), 1);
+        }
+    } else {
+        if (!row) {
+            row = node.addWidget("string", CONST_ROW, String(real.value ?? ""), (v) => {
+                real.value = String(v ?? "").trim();
+                real.callback?.(real.value);
+                // the setter may have made it unique (name_0, ...)
+                if (row.value !== real.value) row.value = real.value;
+            });
+            row.serialize = false;
+            row.tooltip = "The name an Unbundle with 'get' or a KJNodes Get "
+                + "reads this bundle by. Turn it off in config -> Set.";
+        }
+        row.value = String(real.value ?? "");     // through to the surviving state
+        placeConstantRow(node);
+    }
+    if (!app.configuringGraph && typeof node.computeSize === "function" && node.size) {
+        node.setSize?.([node.size[0], node.computeSize()[1]]);
+    }
+    notifyVue(node);
+    node.setDirtyCanvas?.(true, true);
+}
+
+/** Keep the field showing the real name (a paste can rename it). */
+function syncConstantRow(node) {
+    const row = widget(node, CONST_ROW);
+    const real = widget(node, SET_W);
+    if (row && real && row.value !== real.value
+            && document.activeElement?.tagName !== "INPUT") {
+        row.value = String(real.value ?? "");
+    }
+}
+
 function setup(node) {
+    node.__obvpmNameProxy = (show) => showConstantRow(node, show);
     for (const name of OWNED) hide(widget(node, name));
     // ... and their sockets with them. Anything genuinely wired is left
     // alone, so the schema or the preset name can still be driven from
@@ -465,6 +625,7 @@ function setup(node) {
         };
     }
     void rebuild(node);
+    void loadUserPresets(typeIdOf(node));
 }
 
 /**
@@ -679,6 +840,7 @@ function buildFields(node, answer) {
     refreshState(node);
     applyVisibility(node);
     notifyVue(node);
+    tell(node, "built");
 }
 
 function noteError(node, message) {
@@ -691,56 +853,209 @@ function noteError(node, message) {
     w.disabled = true;
 }
 
+// ---------------------------------------------------------------------
+// Workflow presets shared by Preset Type Id
+//
+// Nodes with the same Preset Type Id share their WORKFLOW presets too.
+// Each keeps its own copy (the `presets` widget: the server, a node
+// copied alone into another workflow and older versions all see an
+// ordinary node), and every change is written to all of them. What stays
+// per node: which preset is selected, and which are hidden.
+// ---------------------------------------------------------------------
+
+/** The other nodes sharing this node's workflow presets. */
+function peersOf(node) {
+    const id = typeIdOf(node);
+    return id ? nodesUsingTypeId(id).filter((n) => n !== node) : [];
+}
+
+/** A stable text for comparing two preset sets. */
+function sameSet(a, b) {
+    const norm = (v) => JSON.stringify(Object.keys(v ?? {}).sort()
+        .map((k) => [k, v[k]]));
+    return norm(a) === norm(b);
+}
+
+function samePresets(a, b) {
+    const ka = Object.keys(a).sort();
+    const kb = Object.keys(b).sort();
+    return ka.length === kb.length && ka.every((k, i) => k === kb[i] && sameSet(a[k], b[k]));
+}
+
+/**
+ * Write the workflow presets to this node and every node sharing them.
+ * `change` tells the others' choosers what happened to a name they may
+ * have selected: {renamed: [from, to]} or {deleted: name}.
+ */
+function writeWorkflowPresets(node, presets, change) {
+    writeJson(node, PRESETS, presets);
+    for (const peer of peersOf(node)) {
+        writeJson(peer, PRESETS, presets);
+        const chooser = widget(peer, PRESET);
+        if (chooser && change?.renamed && chooser.value === change.renamed[0]) {
+            chooser.value = change.renamed[1];
+        }
+        if (chooser && change?.deleted && chooser.value === change.deleted) {
+            chooser.value = CUSTOM;     // its values stay: they are what runs
+        }
+        void rebuild(peer, true);
+    }
+}
+
+/**
+ * A node joins a group (a Preset Type Id other nodes here already use):
+ * the lists are merged. A name only one side has is simply combined; the
+ * same name with the same values is one preset; the same name with
+ * DIFFERENT values keeps the group's under the name, and the joining
+ * node's becomes "name 2" -- with its selection moved onto it, so the
+ * label still matches what the node runs. Nothing a node runs changes.
+ */
+function joinGroup(node) {
+    const peers = peersOf(node);
+    if (!peers.length) return false;
+    const group = readJson(peers[0], PRESETS);
+    const mine = readJson(node, PRESETS);
+    if (samePresets(group, mine)) return false;
+    const merged = Object.assign(Object.create(null), group);
+    const chooser = widget(node, PRESET);
+    for (const [name, set] of Object.entries(mine)) {
+        if (!Object.prototype.hasOwnProperty.call(merged, name)) {
+            merged[name] = set;
+        } else if (!sameSet(merged[name], set)) {
+            let n = 2;
+            while (Object.prototype.hasOwnProperty.call(merged, `${name} ${n}`)) n++;
+            merged[`${name} ${n}`] = set;
+            if (chooser && chooser.value === name) chooser.value = `${name} ${n}`;
+        }
+    }
+    writeWorkflowPresets(node, merged);
+    void rebuild(node, true);
+    return true;
+}
+
+/**
+ * Where a preset lives, by its chooser label: the workflow's own store
+ * (the `presets` widget) or, for a ★ label, the user presets. Both are
+ * {name: {field: value}}; only reading and writing differ.
+ */
+function storeOf(node, label) {
+    if (isUserLabel(label)) {
+        const lib = typeIdOf(node);
+        return {
+            where: "your user presets", lib, key: bareName(label),
+            read: () => Object.assign(Object.create(null), userPresets(lib)),
+            write: (presets) => saveUserPresets(lib, presets),
+            label: (key) => STAR + key,
+        };
+    }
+    return {
+        where: "the workflow presets", lib: "", key: label,
+        read: () => readJson(node, PRESETS),
+        // synchronous on purpose: a save into the workflow is done the
+        // moment it returns (only the user presets' write is awaited)
+        write: (presets, change) => { writeWorkflowPresets(node, presets, change); },
+        label: (key) => key,
+    };
+}
+
+/** After a store changed: the workflow's is a widget (rebuild picks the
+ *  new list up); the user presets refresh their nodes when it is written. */
+function afterStore(node, store) {
+    if (store.lib) refreshState(node);
+    else void rebuild(node, true);
+}
+
+async function badName(clean) {
+    if (clean === CUSTOM) {
+        await notice("'" + CUSTOM + "' is the name for values that are not "
+                     + "a preset; pick another.");
+        return true;
+    }
+    if (isUserLabel(clean)) {
+        await notice("A preset name cannot start with '" + STAR.trim()
+                     + "': that marks user presets.");
+        return true;
+    }
+    return false;
+}
+
 // In-page dialogs, not window.prompt/confirm/alert: ComfyUI Desktop's
 // Electron shell has no prompt() at all, so "save as preset" silently
 // did nothing there (issue #11). See obvpm_ui.js.
 async function savePreset(node, name) {
-    const chosen = name ?? await askText(
-        "Save these values as a preset called:",
-        { placeholder: "preset name", ok: "Save" });
-    const clean = String(chosen ?? "").trim();
-    if (!clean) return;
-    if (clean === CUSTOM) {
-        await notice("'" + CUSTOM + "' is the name for values that are not "
-                     + "a preset; pick another.");
+    let store;
+    let clean;
+    if (name) {
+        // "save": into the preset that is selected, wherever it lives
+        store = storeOf(node, name);
+        clean = store.key;
+    } else {
+        // "save as": into this workflow, or -- when the node names a
+        // Preset Type Id -- into the user's own presets, which every workflow
+        // with that id shows
+        const lib = typeIdOf(node);
+        let target = "workflow";
+        let chosen;
+        if (lib) {
+            // the name and where it goes, in one dialog
+            const answer = await askTextChoice(
+                "Save as a User Preset to save a preset that can be used "
+                + "across workflow files. Save as a Workflow Preset to save a "
+                + "preset that is stored and usable within this workflow file.",
+                [{ label: "New Workflow Preset", value: "workflow" },
+                 { label: "New User Preset", value: "user" }],
+                { title: "Save as preset", placeholder: "preset name" });
+            if (!answer) return;
+            target = answer.value;
+            chosen = answer.text;
+        } else {
+            chosen = await askText(
+                "Save these values as a preset called:",
+                { placeholder: "preset name", ok: "Save" });
+        }
+        store = target === "user" ? storeOf(node, STAR + "x") : storeOf(node, "x");
+        clean = String(chosen ?? "").trim();
+        if (!clean || await badName(clean)) return;
+    }
+    const presets = store.read();
+    if (!name && Object.prototype.hasOwnProperty.call(presets, clean)
+            && !(await askConfirm("Replace the preset '" + clean + "' in "
+                                  + store.where + "?", { ok: "Replace" }))) {
         return;
     }
-    const library = readJson(node, PRESETS);
-    if (!name && Object.prototype.hasOwnProperty.call(library, clean)
-            && !(await askConfirm("Replace the preset '" + clean + "'?",
-                                  { ok: "Replace" }))) {
+    presets[clean] = readJson(node, VALUES);
+    try {
+        const pending = store.write(presets);
+        if (pending) await pending;
+    } catch (err) {
+        await notice("Could not save the preset: " + String(err?.message ?? err));
         return;
     }
-    library[clean] = readJson(node, VALUES);
-    writeJson(node, PRESETS, library);
     const chooser = widget(node, PRESET);
-    if (chooser) chooser.value = clean;
-    void rebuild(node, true);
+    if (chooser) chooser.value = store.label(clean);
+    afterStore(node, store);
 }
 
 /**
  * Rename the selected preset, keeping its values.
  *
- * The name is the key in the library AND the chooser's value AND the
+ * The name is the key in the store AND the chooser's value AND the
  * label a saved workflow (and every take) carries, so all three move
  * together. Renaming onto an existing name replaces that preset, after
  * asking -- the same rule as saving under a taken name.
  */
 async function renamePreset(node) {
-    const name = selected(node);
-    if (name === CUSTOM) return;
+    const label = selected(node);
+    if (label === CUSTOM) return;
+    const store = storeOf(node, label);
+    const name = store.key;
     const chosen = await askText("Rename the preset '" + name + "' to:",
                                  { value: name, ok: "Rename" });
     const clean = String(chosen ?? "").trim();
-    if (!clean || clean === name) return;
-    if (clean === CUSTOM) {
-        await notice("'" + CUSTOM + "' is the name for values that are not "
-                     + "a preset; pick another.");
-        return;
-    }
-    const library = readJson(node, PRESETS);
-    if (!Object.prototype.hasOwnProperty.call(library, name)) return;
-    if (Object.prototype.hasOwnProperty.call(library, clean)
+    if (!clean || clean === name || await badName(clean)) return;
+    const presets = store.read();
+    if (!Object.prototype.hasOwnProperty.call(presets, name)) return;
+    if (Object.prototype.hasOwnProperty.call(presets, clean)
             && !(await askConfirm("Replace the preset '" + clean + "' with '"
                                   + name + "'?", { ok: "Replace" }))) {
         return;
@@ -749,29 +1064,43 @@ async function renamePreset(node) {
     // than dropping to the end (the chooser sorts anyway; the JSON is
     // what a diff of the workflow shows).
     const renamed = Object.create(null);
-    for (const key of Object.keys(library)) {
+    for (const key of Object.keys(presets)) {
         if (key === clean) continue;    // being replaced
-        renamed[key === name ? clean : key] = library[key];
+        renamed[key === name ? clean : key] = presets[key];
     }
-    writeJson(node, PRESETS, renamed);
+    try {
+        const pending = store.write(renamed, { renamed: [name, clean] });
+        if (pending) await pending;
+    } catch (err) {
+        await notice("Could not rename the preset: " + String(err?.message ?? err));
+        return;
+    }
     const chooser = widget(node, PRESET);
-    if (chooser) chooser.value = clean;
-    void rebuild(node, true);
+    if (chooser) chooser.value = store.label(clean);
+    afterStore(node, store);
 }
 
 async function deletePreset(node) {
-    const name = selected(node);
-    if (name === CUSTOM) return;
-    if (!(await askConfirm("Delete the preset '" + name + "'? The values "
-                           + "stay on the node.", { ok: "Delete" }))) {
+    const label = selected(node);
+    if (label === CUSTOM) return;
+    const store = storeOf(node, label);
+    if (!(await askConfirm("Delete the preset '" + store.key + "' from "
+                           + store.where + "? The values stay on the node.",
+                           { ok: "Delete" }))) {
         return;
     }
-    const library = readJson(node, PRESETS);
-    delete library[name];
-    writeJson(node, PRESETS, library);
+    const presets = store.read();
+    delete presets[store.key];
+    try {
+        const pending = store.write(presets, { deleted: store.key });
+        if (pending) await pending;
+    } catch (err) {
+        await notice("Could not delete the preset: " + String(err?.message ?? err));
+        return;
+    }
     const chooser = widget(node, PRESET);
     if (chooser) chooser.value = CUSTOM;
-    void rebuild(node, true);
+    afterStore(node, store);
 }
 
 /** Load the selected preset's values into the controls. */
@@ -783,7 +1112,7 @@ async function applyPreset(node) {
         refreshState(node);
         return;
     }
-    const saved = readJson(node, PRESETS)[name];
+    const saved = lookupPreset(node, name);
     if (!saved || typeof saved !== "object") return;
     // The preset's values, and the schema default for any field it was
     // saved without (see presetValue) -- the same reading modifiedFields
@@ -910,7 +1239,365 @@ function argHint(row) {
     return null;                        // nothing to fill in for this type
 }
 
-async function openSchemaEditor(node) {
+// ---------------------------------------------------------------------
+// config: the Presets and Set pages (the Schema page is openConfig's own)
+// ---------------------------------------------------------------------
+
+function section(title, ...children) {
+    const box = el("div", { display: "flex", flexDirection: "column", gap: "6px" });
+    box.append(el("div", { font: "600 14px sans-serif" }, title), ...children);
+    return box;
+}
+
+function hint(text) {
+    // pre-line: a "\n" in the text starts a new line
+    return el("div", { color: DIM, font: "12px sans-serif", whiteSpace: "pre-line" }, text);
+}
+
+function checkRow(label, checked, onChange, note) {
+    const row = el("label", { display: "flex", alignItems: "center", gap: "8px",
+                              cursor: "pointer" });
+    const box = el("input");
+    box.type = "checkbox";
+    box.checked = !!checked;
+    box.addEventListener("change", () => onChange(box.checked));
+    row.append(box, el("span", { flex: "1" }, label));
+    if (note) row.append(el("span", { color: DIM, font: "12px sans-serif" }, note));
+    return row;
+}
+
+function radioRow(name, options, value, onChange) {
+    const row = el("div", { display: "flex", gap: "14px", flexWrap: "wrap" });
+    for (const opt of options) {
+        const lab = el("label", { display: "flex", alignItems: "center", gap: "5px",
+                                  cursor: "pointer" });
+        const r = el("input");
+        r.type = "radio";
+        r.name = name;
+        r.checked = opt.value === value;
+        r.addEventListener("change", () => { if (r.checked) onChange(opt.value); });
+        lab.append(r, el("span", {}, opt.label));
+        row.append(lab);
+    }
+    return row;
+}
+
+/** A small pop-up over the config dialog, with its own buttons. */
+function popOver(overlay, title, width, build) {
+    const pop = el("div", {
+        position: "fixed", inset: "0", zIndex: "10001",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        background: "rgba(0,0,0,0.35)",
+    });
+    const box = el("div", {
+        background: PANEL, border: "1px solid " + EDGE,
+        borderRadius: "8px", padding: "12px", width,
+        display: "flex", flexDirection: "column", gap: "8px",
+        boxShadow: "0 8px 40px rgba(0,0,0,0.5)", color: INK, font: TEXT,
+        maxHeight: "86vh", overflowY: "auto",
+    });
+    box.append(el("div", { font: TITLE }, title));
+    const close = () => pop.remove();
+    build(box, close);
+    pop.appendChild(box);
+    pop.addEventListener("mousedown", (ev) => { if (ev.target === pop) close(); });
+    pop.dataset.obvpmPop = "1";      // Escape closes this first
+    overlay.appendChild(pop);
+}
+
+function textArea(value, minHeight) {
+    const area = el("textarea", {
+        background: FILL, color: INK, border: "1px solid " + EDGE,
+        borderRadius: "4px", padding: "6px 8px", font: "12px monospace",
+        minHeight: minHeight ?? "220px", resize: "vertical", boxSizing: "border-box",
+        whiteSpace: "pre", overflowX: "auto",
+    });
+    area.value = value ?? "";
+    area.spellcheck = false;
+    return area;
+}
+
+/**
+ * The Presets page: the Preset Type Id this node's user presets go by,
+ * which of the workflow's presets the chooser shows, and export /
+ * import. The Preset Type Id and the shown list apply with the dialog's
+ * Apply; export and import act at once (each says so).
+ */
+function presetsPane(node, overlay, say) {
+    const pane = el("div", { display: "flex", flexDirection: "column", gap: "14px",
+                             overflowY: "auto", padding: "2px" });
+    let typeId = typeIdOf(node) || String(node.properties?.[TYPE_ID_PROP] ?? "");
+    const hidden = hiddenPresets(node);
+
+    // -- user presets: the Preset Type Id
+    const typeIdStatus = hint("");
+    // the user presets, each with a checkbox like the workflow presets
+    // below (hidden per node; kept in the same list, by their ★ labels)
+    const userList = el("div", { display: "flex", flexDirection: "column", gap: "3px" });
+    let listed = [];
+    const paintStatus = async () => {
+        const lib = cleanTypeId(typeId);
+        userList.replaceChildren();
+        listed = [];
+        if (!typeId.trim()) {
+            typeIdStatus.textContent = "No Preset Type Id: 'save as' saves workflow presets only.";
+            return;
+        }
+        if (!lib) {
+            typeIdStatus.textContent = "Use letters, digits, spaces, - _ or . (up to 64).";
+            return;
+        }
+        const presets = await loadUserPresets(lib);
+        if (cleanTypeId(typeId) !== lib) return;      // typed on meanwhile
+        const err = userPresetsError(lib);
+        const names = Object.keys(presets).sort((a, b) => a.localeCompare(b));
+        typeIdStatus.textContent = err ? err
+            : names.length ? "" : `No user presets in '${lib}' yet.`;
+        typeIdStatus.style.display = typeIdStatus.textContent ? "" : "none";
+        for (const name of names) {
+            const label = STAR + name;
+            listed.push(label);
+            userList.append(checkRow(name, !hidden.has(label),
+                (on) => { if (on) hidden.delete(label); else hidden.add(label); },
+                label === selected(node) ? "selected now" : ""));
+        }
+    };
+    const typeIdBox = textBox(typeId, "e.g. obvpm-h3-generation-engine",
+                           (v) => { typeId = v; void paintStatus(); }, "260px");
+    pane.append(section("Preset Type Id",
+        hint("Any Value Presets node with the same Preset Type Id will "
+             + "share presets."),
+        typeIdBox));
+    pane.append(section("User Presets",
+        hint("User presets are saved in the ComfyUI user folder at "
+             + "user/default/obvpm/presets/<preset-type-id>.json.\n"
+             + "This allows using the same user presets across workflow "
+             + "files. Uncheck presets to hide them from the selection "
+             + "dropdown."),
+        typeIdStatus, userList));
+    void paintStatus();
+
+    // -- the workflow's presets: shown or hidden in the chooser
+    const own = Object.keys(readJson(node, PRESETS)).sort((a, b) => a.localeCompare(b));
+    const ownList = el("div", { display: "flex", flexDirection: "column", gap: "3px" });
+    if (!own.length) ownList.append(hint("This workflow has no presets of its own."));
+    for (const name of own) {
+        ownList.append(checkRow(name, !hidden.has(name),
+            (on) => { if (on) hidden.delete(name); else hidden.add(name); },
+            name === selected(node) ? "selected now" : ""));
+    }
+    const peers = peersOf(node);
+    const drifted = peers.filter((n) => !samePresets(readJson(n, PRESETS), readJson(node, PRESETS)));
+    const shared = el("div", { display: "flex", flexDirection: "column", gap: "4px" });
+    if (peers.length) {
+        shared.append(hint(peers.length === 1
+            ? "Shared with 1 other node with this Preset Type Id."
+            : `Shared with ${peers.length} other nodes with this Preset Type Id.`));
+    }
+    if (drifted.length) {
+        const syncBtn = pushButton("Sync from this node", () => {
+            writeWorkflowPresets(node, readJson(node, PRESETS));
+            syncBtn.disabled = true;
+            say("The other nodes now have this node's workflow presets.");
+        });
+        shared.append(el("div", { color: "#e8b86b", font: "12px sans-serif" },
+            `${drifted.length} of them ${drifted.length === 1 ? "has" : "have"} `
+            + "different workflow presets (edited elsewhere, or by an older "
+            + "version)."), syncBtn);
+        syncBtn.style.alignSelf = "flex-start";
+    }
+    pane.append(section("Workflow Presets",
+        hint("Workflow presets are saved in the workflow file. Uncheck "
+             + "presets to hide them from the selection dropdown."),
+        shared,
+        ownList));
+
+    // -- export / import
+    const exportBtn = pushButton("Export…", () => popOver(overlay, "Export presets",
+        "min(700px, 92vw)", (box, close) => {
+            const lib = cleanTypeId(typeId);
+            let what = "workflow";
+            let withSchema = false;
+            const area = textArea("");
+            const paint = () => {
+                const presets = Object.create(null);
+                if (what !== "user") Object.assign(presets, readJson(node, PRESETS));
+                if (what !== "workflow" && lib) Object.assign(presets, userPresets(lib));
+                area.value = exportText({
+                    typeId: lib, presets,
+                    schema: withSchema ? widget(node, SCHEMA)?.value : "",
+                });
+            };
+            box.append(
+                radioRow("obvpm-export-what", [
+                    { label: "workflow presets", value: "workflow" },
+                    ...(lib ? [{ label: "user presets", value: "user" },
+                               { label: "both", value: "both" }] : []),
+                ], what, (v) => { what = v; paint(); }),
+                checkRow("include the schema (the fields)", false,
+                         (on) => { withSchema = on; paint(); }),
+                area,
+                hint("Send this text or the file to someone: they import it on "
+                     + "their Value Presets node (config → Presets → Import)."));
+            const row = el("div", { display: "flex", gap: "6px", justifyContent: "flex-end" });
+            row.append(
+                pushButton("Close", close),
+                pushButton("Copy", async () => {
+                    try {
+                        await navigator.clipboard.writeText(area.value);
+                        say("Copied the presets.");
+                    } catch (err) {
+                        area.select();
+                        say("Select the text and copy it (the clipboard is not available here).");
+                    }
+                }),
+                pushButton("Download", () => {
+                    const base = (lib || node.title || "presets").replace(/[^A-Za-z0-9._-]+/g, "_");
+                    download(base + ".presets.json", area.value);
+                }, { fontWeight: "600" }));
+            box.append(row);
+            paint();
+        }));
+    const importBtn = pushButton("Import…", () => popOver(overlay, "Import presets",
+        "min(700px, 92vw)", (box, close) => {
+            const lib = cleanTypeId(typeId);
+            let into = "workflow";
+            let mode = "keep";
+            const area = textArea("", "180px");
+            area.placeholder = "Paste an exported presets file here, or open one.";
+            const file = el("input");
+            file.type = "file";
+            file.accept = ".json,application/json";
+            file.addEventListener("change", async () => {
+                const f = file.files?.[0];
+                if (!f) return;
+                if (f.size > 1024 * 1024) { status.textContent = "That file is larger than 1 MB."; return; }
+                area.value = await f.text();
+            });
+            const status = el("div", { color: "#e88", whiteSpace: "pre-wrap" });
+            box.append(
+                area, file,
+                el("div", {}, "Into:"),
+                radioRow("obvpm-import-into", [
+                    { label: "workflow presets", value: "workflow" },
+                    ...(lib ? [{ label: "user presets ('" + lib + "')", value: "user" }] : []),
+                ], into, (v) => { into = v; }),
+                el("div", {}, "A preset with a name that is already there:"),
+                radioRow("obvpm-import-mode", [
+                    { label: "keep both (the new one is renamed)", value: "keep" },
+                    { label: "replace it", value: "replace" },
+                ], mode, (v) => { mode = v; }),
+                hint("Imported at once. Presets are matched to fields by name: a "
+                     + "field this node lacks is ignored, one the preset lacks "
+                     + "takes its default."),
+                status);
+            const row = el("div", { display: "flex", gap: "6px", justifyContent: "flex-end" });
+            row.append(
+                pushButton("Cancel", close),
+                pushButton("Import", async () => {
+                    const got = parseImport(area.value);
+                    if (got.error) { status.textContent = got.error; return; }
+                    try {
+                        if (into === "user" && lib) {
+                            const merged = mergePresets(userPresets(lib), got.presets, mode);
+                            await saveUserPresets(lib, merged.presets);
+                            say(`Imported ${merged.added.length} preset(s) into your user presets ('${lib}').`);
+                        } else {
+                            const merged = mergePresets(readJson(node, PRESETS), got.presets, mode);
+                            writeWorkflowPresets(node, merged.presets);
+                            say(`Imported ${merged.added.length} preset(s) into the workflow presets.`);
+                            void rebuild(node, true);
+                        }
+                    } catch (err) {
+                        status.textContent = "Could not import: " + String(err?.message ?? err);
+                        return;
+                    }
+                    close();
+                }, { fontWeight: "600" }));
+            box.append(row);
+        }));
+    const buttons = el("div", { display: "flex", gap: "6px" });
+    buttons.append(exportBtn, importBtn);
+    pane.append(section("Export / import",
+        hint("Move presets between workflows or share them: export copies or "
+             + "downloads them as a small file; import takes one in."),
+        buttons));
+
+    return {
+        element: pane,
+        async apply() {
+            const typed = String(typeId ?? "").trim();
+            const lib = cleanTypeId(typed);
+            if (typed && !lib) {
+                return "The Preset Type Id can only use letters, digits, spaces, - _ or .";
+            }
+            node.properties ??= {};
+            const before = typeIdOf(node);
+            if (lib) node.properties[TYPE_ID_PROP] = lib;
+            else delete node.properties[TYPE_ID_PROP];
+            if (lib && lib !== before) joinGroup(node);
+            // workflow presets this node has, and the user presets listed
+            // for the id being applied
+            const keep = [...hidden].filter((n) => own.includes(n)
+                || (isUserLabel(n) && listed.includes(n)));
+            if (keep.length) node.properties[HIDDEN_PROP] = keep;
+            else delete node.properties[HIDDEN_PROP];
+            if (lib) await loadUserPresets(lib);
+            return null;
+        },
+    };
+}
+
+/**
+ * The Set page: hand this node's bundle to others BY NAME, the way a
+ * Bundle's "set" does -- an Unbundle with "get", or a KJNodes Get, reads
+ * it without a wire.
+ */
+/** A starting name for the constant, from the node's title. */
+function constantNameFrom(node) {
+    // the pack suffix every obvpm node's title carries is not part of a name
+    const slug = String(node.title ?? "").replace(/\s*\(obvpm\)\s*$/i, "").toLowerCase()
+        .replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+    return slug || "presets";
+}
+
+function setPane(node) {
+    const pane = el("div", { display: "flex", flexDirection: "column", gap: "10px",
+                             padding: "2px" });
+    const w = widget(node, SET_W);
+    let on = constantOn(node);
+    pane.append(
+        section("Set to constant",
+            hint("On, this node's bundle is a constant: an Unbundle with "
+                 + "'get' (its config) or a KJNodes Get reads it by NAME, "
+                 + "without a wire, anywhere in this graph and the subgraphs "
+                 + "inside it -- the same as a Bundle's 'set'. The name is "
+                 + "the node's set_constant field, its last one; set or "
+                 + "change it there."),
+            checkRow("set this bundle to a constant", on, (v) => { on = v; })));
+    if (!w) {
+        pane.append(hint("This node has no name field yet: update "
+                         + "comfyui-obvpm and restart ComfyUI (a node added "
+                         + "before the update may need to be added again)."));
+    }
+    return {
+        element: pane,
+        apply() {
+            if (!w) return null;
+            if (on && !constantOn(node)) {
+                // a name to start from; the node's field changes it, and
+                // setMode makes it unique among the setters in scope
+                if (!String(w.value ?? "").trim()) w.value = constantNameFrom(node);
+                setMode(node, true);
+            } else if (!on && constantOn(node)) {
+                setMode(node, false);
+            }
+            return null;
+        },
+    };
+}
+
+async function openConfig(node, tab = "presets") {
     const answer = await describe(widget(node, SCHEMA)?.value ?? "");
     const rows = (answer.fields ?? []).map(rowOf);
 
@@ -919,7 +1606,8 @@ async function openSchemaEditor(node) {
     // column-per-part reading that makes the dialog a table
     const { overlay, panel, close } = openOverlay("min(1180px, 96vw)");
 
-    const title = el("div", { font: TITLE }, "Schema");
+    const title = el("div", { display: "flex", alignItems: "center", gap: "6px" });
+    title.append(el("div", { font: TITLE, marginRight: "12px" }, "Config"));
     const columns = el("div", {
         display: "flex", gap: "5px", color: DIM, font: "12px sans-serif",
         padding: "0 2px",
@@ -1270,13 +1958,58 @@ async function openSchemaEditor(node) {
     textButton.title = "Edit the schema as text: paste one in, copy this one "
         + "out, or write lines by hand. Nothing changes on the node until Apply.";
 
-    footer.append(
+    const schemaTools = el("div", { display: "flex", gap: "6px" });
+    schemaTools.append(
         pushButton("+ add field", () => {
             rows.push({ name: "", kind: "text", ref: "", arg: "", def: "",
                         when: "", hint: "" });
             draw();
         }),
-        textButton, note,
+        textButton);
+    const schemaPane = el("div", {
+        display: "flex", flexDirection: "column", gap: "6px",
+        flex: "1 1 auto", minHeight: "0",
+    });
+    schemaPane.append(columns, list, error, schemaTools);
+    const presets = presetsPane(node, overlay, say);
+    const setter = setPane(node);
+    const pages = { schema: schemaPane, presets: presets.element, set: setter.element };
+    // the pages as one segmented toggle: a track with the chosen segment
+    // filled, like the frontend's own on/off toggles
+    const tabs = {};
+    const toggle = el("div", {
+        display: "inline-flex", gap: "2px", padding: "2px",
+        background: FILL, border: "1px solid " + EDGE, borderRadius: "6px",
+    });
+    toggle.setAttribute("role", "tablist");
+    function show(which) {
+        for (const [key, page] of Object.entries(pages)) {
+            const on = key === which;
+            page.style.display = on ? "flex" : "none";
+            const t = tabs[key];
+            if (!t) continue;
+            t.style.background = on ? "var(--comfy-menu-secondary-bg, #4a4a4a)" : "transparent";
+            t.style.color = on ? INK : DIM;
+            t.style.fontWeight = on ? "600" : "400";
+            t.style.boxShadow = on ? "0 1px 2px rgba(0,0,0,0.35)" : "none";
+            t.setAttribute("aria-selected", on ? "true" : "false");
+        }
+    }
+    for (const [key, label] of [["presets", "Presets"], ["schema", "Schema"], ["set", "Set"]]) {
+        const t = el("button", {
+            border: "none", borderRadius: "4px", padding: "4px 14px",
+            font: TEXT, cursor: "pointer", background: "transparent", color: DIM,
+        }, label);
+        t.type = "button";
+        t.setAttribute("role", "tab");
+        t.addEventListener("click", () => show(key));
+        tabs[key] = t;
+        toggle.append(t);
+    }
+    title.append(toggle);
+
+    footer.append(
+        note,
         pushButton("Cancel", close),
         pushButton("Apply", async () => {
             const text = schemaOf(rows);
@@ -1288,6 +2021,12 @@ async function openSchemaEditor(node) {
             if (check.error) {
                 error.textContent = check.error;
                 error.style.display = "block";
+                show("schema");
+                return;
+            }
+            const problem = (await presets.apply()) || setter.apply();
+            if (problem) {
+                say(problem);
                 return;
             }
             // Carry the stored values across a rename BEFORE the
@@ -1307,8 +2046,9 @@ async function openSchemaEditor(node) {
         }, { fontWeight: "600" }),
     );
 
-    panel.append(title, columns, list, error, footer);
+    panel.append(title, schemaPane, presets.element, setter.element, footer);
     draw();
+    show(pages[tab] ? tab : "presets");
     document.body.appendChild(overlay);
 }
 
@@ -1468,9 +2208,11 @@ function rowButtons(node) {
         { key: "delete", label: "delete", on: named,
           tip: "Remove '" + name + "'. The values stay on the node.",
           run: () => { void deletePreset(node); } },
-        { key: "schema", label: "schema", on: true,
-          tip: "Add, rename, retype or reorder the fields.",
-          run: () => openSchemaEditor(node) },
+        { key: "schema", label: "config", on: true,
+          tip: "The fields (add, rename, retype, reorder), the presets "
+               + "(user presets, which workflow presets show, export / "
+               + "import) and the set option.",
+          run: () => openConfig(node) },
     ];
 }
 
@@ -1659,6 +2401,7 @@ function addButtonRow(node) {
         if (at >= 0 && at !== node.widgets.length - 1) {
             node.widgets.push(node.widgets.splice(at, 1)[0]);
         }
+        placeConstantRow(node);
         paintButtonRow(node);
         return node.__obvpmRow;
     }
@@ -1750,6 +2493,7 @@ function addButtonRow(node) {
     // was built -- so the drop that cleared the declared widgets' sockets
     // never saw it. Left alone it shows as a pin carrying nothing.
     dropWidgetSockets(node, [ROW_NAME]);
+    placeConstantRow(node);
     paintButtonRow(node);
     return node.__obvpmRow;
 }

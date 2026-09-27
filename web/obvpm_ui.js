@@ -722,6 +722,58 @@ export function askConfirm(message, { title, ok } = {}) {
     });
 }
 
+/**
+ * A question with several answers: resolves the chosen one's `value`,
+ * or null on Cancel / Escape. `choices` = [{label, value}], the last one
+ * drawn as the default.
+ */
+export function askChoice(message, choices, { title } = {}) {
+    return new Promise((resolve) => {
+        let answered = false;
+        const settle = (v) => { if (!answered) { answered = true; resolve(v); } };
+        const body = el("div", { whiteSpace: "pre-wrap" }, message);
+        const buttons = [pushButton("Cancel", () => { settle(null); close(); })];
+        choices.forEach((c, i) => {
+            buttons.push(pushButton(c.label, () => { settle(c.value); close(); },
+                                    i === choices.length - 1 ? { fontWeight: "600" } : undefined));
+        });
+        const close = dialog(title ?? "", body, buttons, () => settle(null));
+    });
+}
+
+/**
+ * A name and a choice in one dialog: resolves {value, text} for the button
+ * pressed, or null on Cancel / Escape. The name field has focus; a button
+ * does nothing while it is empty. Enter picks the last choice (drawn as
+ * the default).
+ */
+export function askTextChoice(message, choices, { title, placeholder, value } = {}) {
+    return new Promise((resolve) => {
+        let answered = false;
+        const settle = (v) => { if (!answered) { answered = true; resolve(v); } };
+        let text = value ?? "";
+        const box = textBox(text, placeholder ?? "", (v) => { text = v; }, "100%");
+        const body = el("div", { display: "flex", flexDirection: "column", gap: "8px" });
+        body.append(el("div", { whiteSpace: "pre-wrap" }, message), box);
+        const pick = (c) => {
+            if (!String(text).trim()) { box.focus(); return; }
+            settle({ value: c.value, text });
+            close();
+        };
+        const buttons = [pushButton("Cancel", () => { settle(null); close(); })];
+        choices.forEach((c, i) => {
+            buttons.push(pushButton(c.label, () => pick(c),
+                                    i === choices.length - 1 ? { fontWeight: "600" } : undefined));
+        });
+        box.addEventListener("keydown", (ev) => {
+            if (ev.key === "Enter") { ev.preventDefault(); pick(choices[choices.length - 1]); }
+        });
+        const close = dialog(title ?? "", body, buttons, () => settle(null));
+        box.focus();
+        box.select();
+    });
+}
+
 /** window.alert: resolves when dismissed. */
 export function notice(message, title) {
     return new Promise((resolve) => {

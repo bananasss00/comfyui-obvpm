@@ -38,6 +38,9 @@ import { dropWidgetSockets } from "./obvpm_ui.js";
 
 export const BUNDLE = "Bundle (obvpm)";
 export const UNBUNDLE = "Unbundle (obvpm)";
+// A Value Presets node can set its bundle by name too (config -> Set);
+// it keeps its own title, which names what it holds.
+export const VALUE_PRESETS = "ValuePresets (obvpm)";
 const KJ_SET = "SetNode";
 const KJ_GET = "GetNode";
 const BUNDLE_TYPE = "OBVPM_BUNDLE";   // see h3/wiretypes.py
@@ -74,9 +77,10 @@ function nameWidget(node) {
     return node?.widgets?.find((w) => w.name === want) ?? null;
 }
 
-/** A Bundle with its set option on. */
+/** A Bundle or Value Presets node with its set option on. */
 export function isOurSetter(node) {
-    return node?.type === BUNDLE && constantOn(node);
+    return (node?.type === BUNDLE || node?.type === VALUE_PRESETS)
+        && constantOn(node);
 }
 
 /** An Unbundle with its get option on. */
@@ -236,7 +240,7 @@ function titleFor(node) {
 
 /** On: the title follows the name. The replaced title is kept. */
 function retitle(node) {
-    if (!constantOn(node)) return;
+    if (!constantOn(node) || node.type === VALUE_PRESETS) return;
     node.properties ??= {};
     if (node.properties[TITLE_PROP] == null) {
         node.properties[TITLE_PROP] = node.title ?? "";
@@ -250,6 +254,7 @@ function retitle(node) {
 
 /** Off: the title it had before. */
 function restoreTitle(node) {
+    if (node.type === VALUE_PRESETS) return;
     const kept = node.properties?.[TITLE_PROP];
     if (kept == null) return;
     delete node.properties[TITLE_PROP];
@@ -382,10 +387,16 @@ function refreshGettersNamed(graph, name) {
 function showNameWidget(node, show) {
     const w = nameWidget(node);
     if (!w) return;
-    w.hidden = !show;
-    (w.options ??= {}).hidden = !show;
+    // A node that shows the name its own way (Value Presets: a field at
+    // the top, value_presets.js) keeps the declared widget hidden -- it
+    // stays where widgets_values expects it -- and is told to show its own.
+    const own = typeof node.__obvpmNameProxy === "function";
+    const visible = show && !own;
+    w.hidden = !visible;
+    (w.options ??= {}).hidden = !visible;
     const elm = w.element ?? w.inputEl;
-    if (elm) elm.style.display = show ? "" : "none";
+    if (elm) elm.style.display = visible ? "" : "none";
+    if (own) node.__obvpmNameProxy(show);
 }
 
 /** Put a moved socket's links back on the right slot index. */
@@ -771,13 +782,14 @@ export function fillConstants(output, root) {
     const walk = (frame, depth) => {
         if (depth > 16) return;
         for (const node of nodesOf(frame.graph)) {
-            if (node.type === BUNDLE || node.type === UNBUNDLE) {
+            if (node.type === BUNDLE || node.type === UNBUNDLE
+                    || node.type === VALUE_PRESETS) {
                 const id = [...frame.path, node.id].join(":");
                 const entry = output[id];
                 // A name with its option off means nothing: send none,
                 // so the server's messages never mention a stale one.
                 if (entry?.inputs && !constantOn(node)) {
-                    entry.inputs[node.type === BUNDLE ? SET_W : GET_W] = "";
+                    entry.inputs[node.type === UNBUNDLE ? GET_W : SET_W] = "";
                 }
             }
             if (isOurGetter(node)) {
@@ -947,7 +959,7 @@ app.registerExtension({
         // Unbundle is set up -- with its option off it is exactly the
         // node it always was.
         const cls = node.comfyClass ?? node.constructor?.comfyClass ?? node.type;
-        if (cls === BUNDLE) setup(node, "set");
+        if (cls === BUNDLE || cls === VALUE_PRESETS) setup(node, "set");
         else if (cls === UNBUNDLE) setup(node, "get");
     },
     setup() {

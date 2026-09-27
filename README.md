@@ -8,6 +8,13 @@ ComfyUI nodes to save time and keep your workflows tidy. Bundle multiple wires i
 
 ### Latest HEAD
 
+- Value Presets: the **schema** button is now **config**, with three pages: Presets, Schema (as before) and Set.
+- Value Presets: **user presets** — presets kept in your user folder under the node's **Preset Type Id**, shared by every workflow whose node has the same id, so your presets survive a new version of a workflow. The workflow's own presets can be hidden from the chooser. See [Value Presets](#value-presets).
+- Value Presets: nodes with the same Preset Type Id also **share their workflow presets** within a workflow.
+- Value Presets: **export / import** presets as a small JSON file, to move them between workflows or share them.
+- Value Presets: **set to constant**, like a Bundle's set — an Unbundle with get or a KJNodes Get reads the bundle by name, without a wire. Turned on in config; the name is the node's **set_constant** field.
+- Value Presets: a borrowed dropdown whose default is not on this install keeps its dropdown (starting on the first entry) instead of turning into a text field.
+- New node: **Override Bundle Values** — override some of a bundle's values (typically a Value Presets node's) per run, with the preset's own ranges and choices, or by wiring in a value no widget can hold. The Value Presets node marks the fields that are overridden downstream. See [Override Bundle Values](#override-bundle-values).
 - Fixed: Load Images & Compose ignored an image list set from outside the node -- e.g. the timeline's "load settings" restoring a take -- and kept showing (and on the next edit wrote back) its old list. It now re-reads the list whenever it changes.
 
 ### 0.2.9 (2026-09-26)
@@ -78,6 +85,7 @@ Every node in this pack is listed with **(obvpm)** after its name, so searching 
 | Node                            | What it does                                                |
 | ------------------------------- | ----------------------------------------------------------- |
 | [Value Presets](#value-presets) | Named presets from an editable template, output as a bundle |
+| [Override Bundle Values](#override-bundle-values) | Override some of a bundle's values -- a preset's -- per run |
 
 **[Bundles](#bundles-obvpmbundle)** — obvpm/bundle
 
@@ -231,7 +239,7 @@ Output: `bundle` — an ordinary bundle, so Unbundle works on it unchanged (hide
 - **reorder** them → nothing moves at all;
 - **rename** one in the schema editor → its stored value is carried to the new name, in the node's own values *and in every preset*.
 
-**Editing the fields.** Press **schema** for a row per field — name, type, range or choices, default, condition, tooltip (with a ✎ button that opens it in a larger box) — with ▲▼ to reorder and a searchable type picker. The picker offers the basic types and then **every dropdown on this install**. **edit as text** opens the schema as plain text, for pasting one in, copying this one out, or writing several lines at once; *Use this schema* checks it and replaces the rows (the node is only changed when you press Apply).
+**Editing the fields.** Press **config** (its **Schema** page) for a row per field — name, type, range or choices, default, condition, tooltip (with a ✎ button that opens it in a larger box) — with ▲▼ to reorder and a searchable type picker. The picker offers the basic types and then **every dropdown on this install**. **edit as text** opens the schema as plain text, for pasting one in, copying this one out, or writing several lines at once; *Use this schema* checks it and replaces the rows (the node is only changed when you press Apply).
 
 **The schema text.** One field per line: `name: type [range or choices] [= default] [when field = value] [# tooltip]`
 
@@ -250,7 +258,28 @@ steps: int 1..200 = 20
 
 **What runs is what you see.** Selecting a preset writes its values into the controls, and they stay **editable**. Change one and the node does not quietly detach the label: it keeps saying which preset the values came from and marks itself modified.
 
-**The row under the fields.** **save as preset** stores the current values under a new name. With a preset selected: **save** writes your edits into it and **revert** puts its values back (both only while something is modified), **rename** gives it another name with its values kept, and **delete** removes it (the values stay on the node). **schema** opens the field editor.
+**The row under the fields.** **save as preset** stores the current values under a new name. With a preset selected: **save** writes your edits into it and **revert** puts its values back (both only while something is modified), **rename** gives it another name with its values kept, and **delete** removes it (the values stay on the node). **config** opens the settings: the presets (Presets), the fields (Schema) and set to constant (Set).
+
+**User presets.** On the config **Presets** page, give the node a **Preset Type Id** (for example `obvpm-h3-generation-engine`) and **save as** asks whether to save a *workflow preset* or a *user preset*. User presets are kept outside the workflow, in your ComfyUI user folder (`user/default/obvpm/presets/<preset-type-id>.json` for the default user), and every Value Presets node with the same Preset Type Id — in any workflow, any version of it — lists them, marked ★. So a preset you saved in one version of a workflow is still there in the next. The workflow presets are what it ships with; untick any of them on the same page and the chooser stops offering it (it stays in the workflow). The Preset Type Id is set by the workflow's author, once, so every version of the workflow carries it; each user's presets stay their own. Pick a distinctive id: nodes with the same id share user presets, even across unrelated workflows.
+
+**Shared workflow presets.** Nodes in a workflow with the same Preset Type Id also share their *workflow* presets: saving, renaming, deleting or importing one on any of them changes the list on all of them (each node still has its own selection and its own hidden presets). When a node joins — its id is set to one other nodes already use, or it is pasted in — the lists are merged: a preset the group already has under the same name with different values keeps the name, and the joining node's becomes "name 2" (its selection follows, so nothing it runs changes). If the lists ever differ (edited by an older version), the Presets page says so and offers **Sync from this node**; loading a workflow never changes them.
+
+**Export / import.** Also on the Presets page: **Export…** copies or downloads presets as a small JSON file (workflow presets, user presets, or both, optionally with the schema); **Import…** takes one in — pasted or opened — into the workflow presets or the user presets, keeping both or replacing on a name clash. Presets are matched to fields by name, so they import into a node whose schema differs: a field it lacks is ignored, one the preset lacks takes its default.
+
+**Set to constant.** On the config **Set** page, turn on *set this bundle to a constant*: the node gets a **set_constant** field, its last one above the buttons (named after the node's title to start with), and an Unbundle with *get* or a KJNodes Get reads this node's bundle by that name, without a wire, the same as a Bundle's *set*. Set or change the name in that field; getters follow a rename. The node keeps its title.
+
+**A borrowed dropdown's default.** A default names something on the schema author's machine — a model or LoRA file — that another install may not have, or has in another folder. The field then keeps its dropdown and starts on the list's first entry (its tooltip says so), instead of turning into a text field.
+
+### Override Bundle Values
+
+Overrides some of a bundle's values without touching where they came from — typically a Value Presets node, so a preset can hold a setting (a model, the steps) that a user can still change for one run.
+
+- **Choose the fields** in the node's config dialog (the gear). Each chosen field gets a **toggle**: off, the bundle's own value passes (the toggle shows it); on, the value row under it replaces it.
+- **From a Value Presets node** the value row is that node's own control for the field — same range, decimals, choices (borrowed dropdowns included) and tooltip — and an override is checked the same way when it runs. The schema's `when` lines apply again: turning a deciding field on brings back the fields it hides, with the values the preset holds for them.
+- **From any other bundle**, a field's type comes from what is wired into the Bundle; an override keeps the type of the value it replaces.
+- **Values no widget can hold** (an image, a model, a latent) get an **input socket** instead: wire something in and it replaces the field; leave it unwired and the bundle's own value passes.
+- **The incoming bundle is never changed** — the same bundle often feeds several nodes — a new one goes out.
+- **The preset node says so.** A field overridden downstream is labelled *overridden* on the Value Presets node, and disabled when every path from it to a node that reads the bundle overrides that field; *overridden in n of m* when only some do.
 
 ## Bundles (obvpm/bundle)
 

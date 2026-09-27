@@ -67,7 +67,7 @@ async function harness() {
                 valueTooltip: (w, width, base) => base,
                 ...Object.fromEntries(["TEXT", "TITLE", "INK", "DIM", "EDGE", "FILL", "PANEL",
                     "textBox", "pushButton", "openOverlay", "dropWidgetSockets",
-                    "askText", "askConfirm", "notice", "NODE_BUTTON", "NODE_BUTTON_HOVER",
+                    "askText", "askConfirm", "askChoice", "askTextChoice", "notice", "NODE_BUTTON", "NODE_BUTTON_HOVER",
                     "nodeButton", "nodeButtonBar", "paintNodeButton"].map((k) => [k, noop])) });
         } else {
             let source = await readFile(new URL(name, root), "utf8");
@@ -302,7 +302,7 @@ test("a different schema, or a forced build, during the request still asks again
 test("a node removed while asking stays quiet: no build, no problem, no more requests", async () => {
     const { p, extensions, asked } = await harness();
     class PresetsNode extends Node {}
-    await extensions[0].beforeRegisterNodeDef(PresetsNode, { name: "ValuePresets (obvpm)" });
+    await extensions.find((e) => e.name === "obvpm.value_presets").beforeRegisterNodeDef(PresetsNode, { name: "ValuePresets (obvpm)" });
     const node = new PresetsNode({});
     const flight = p.rebuild(node, true);
     node.onRemoved();                              // a load replaces it meanwhile

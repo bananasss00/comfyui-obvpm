@@ -47,7 +47,7 @@ import math
 import os
 import re
 
-from .bundle import BUNDLE, MAX_FIELDS as BUNDLE_MAX_FIELDS
+from .bundle import BUNDLE, MAX_FIELDS as BUNDLE_MAX_FIELDS, SchemaBundle
 from .common import _lines
 from .ids import RENAMED
 
@@ -128,6 +128,9 @@ class Field:
         self.default_text = default_text
         self._choices = choices
         self.ref = ref
+        # a borrowed list is the installer's, not the schema's: its
+        # default is a suggestion that may not exist on this machine
+        self.borrowed = ref is not None
         self.lo = lo
         self.hi = hi
         # the range AS WRITTEN, so the schema editor can hand it back
@@ -163,7 +166,30 @@ class Field:
             if options:
                 return options[0]
             return {"int": 0, "float": 0.0, "bool": False}.get(self.kind, "")
-        return self.coerce(text, what="default")
+        try:
+            return self.coerce(text, what="default")
+        except ValueError:
+            # A BORROWED list's default names something on the schema
+            # author's machine -- a model file, a LoRA -- that this one may
+            # not have, or have under another folder. That is not a broken
+            # schema: the field keeps its dropdown and starts on the list's
+            # first entry. (An explicit `choice a, b` list is the schema's
+            # own, so a default outside it is still an error.)
+            options = self.choices() if self.borrowed else None
+            if options:
+                return options[0]
+            raise
+
+    def default_missing(self):
+        """For a borrowed list: the written default when this machine's
+        list lacks it (so the field starts on the first entry), else ''."""
+        if not self.borrowed or not self.default_text:
+            return ""
+        try:
+            self.coerce(self.default_text, what="default")
+            return ""
+        except ValueError:
+            return self.default_text
 
     def coerce(self, value, what="value"):
         """The value as this field's type, or a refusal naming the field.
@@ -708,6 +734,12 @@ def describe(schema):
                 field.ref = None  # this request only; default/coerce reuse the snapshot
             entry["choices"] = field.choices()
             entry["default"] = field.default()
+            missing = field.default_missing()
+            if missing:
+                # said on hover, not as an error: the field works
+                entry["hint"] = ((field.hint + "\n\n") if field.hint else "") + (
+                    "The schema's default, %r, is not in this list here, so "
+                    "the field starts on the first entry." % missing)
         except ValueError as why:
             entry["choices"] = None
             entry["default"] = field.default_text
@@ -897,9 +929,24 @@ class ValuePresets:
                 # Bundle -- see bundleNamesFor in web/obvpm_dynamic.js,
                 # which looks for a widget called `names`.
                 "names": ("STRING", {"default": "", "multiline": True}),
+                # LAST: widgets_values is positional, and a save from
+                # before it existed holds the five above. The constant's
+                # name while "set by name" is on (config -> Set), as on
+                # a Bundle -- see web/obvpm_constants.js.
+                "set": ("STRING", {
+                    "default": "",
+                    "tooltip": "The name other nodes get this bundle by (an "
+                               "Unbundle with 'get', or a KJNodes Get). "
+                               "Turned on in config -> Set.",
+                }),
             },
         }
 
-    def pack(self, schema, preset, values="{}", presets="{}", names=""):
+    def pack(self, schema, preset, values="{}", presets="{}", names="", set=""):
+        # `set` is a name for the browser to join nodes by; nothing to do
+        # with it here
         packed, _fields = resolve(schema, values, presets, preset)
-        return (packed,)
+        # the schema and the stored values travel with the bundle, so an
+        # Override Bundle Values downstream can check and re-resolve its
+        # overrides as this node would (bundle.SchemaBundle)
+        return (SchemaBundle(packed, schema, load_store(values, "values")),)
