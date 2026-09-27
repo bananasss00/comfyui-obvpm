@@ -30,7 +30,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { widget, bundleSourceFor, packerOf, syncSockets, hideWidget,
-         originOf, linkById, notifyVue } from "./obvpm_dynamic.js";
+         originOf, linkById, notifyVue, switchInputs } from "./obvpm_dynamic.js";
 import { describe, fieldWidget, presetsListeners } from "./value_presets.js";
 import { addConfigButton } from "./obvpm_bundle_config.js";
 import { el, TEXT, TITLE, DIM, pushButton, openOverlay } from "./obvpm_ui.js";
@@ -126,10 +126,12 @@ function fieldFromWire(bundleNode, name, index) {
 
 /**
  * The nodes a bundle wire can come from: one, or -- through the switches
- * and reroutes that only carry a bundle -- one per branch, since which
- * branch arrives is not known until it runs. Each is {node, via} where
- * `via` is the node and input the trace asked (for packerOf). Null when
- * any branch cannot be traced.
+ * and reroutes that only carry a bundle -- one per branch that can run.
+ * A switch whose choice is settled before the run (its boolean or case
+ * traced to a widget, a preset value, or a node output that says what it
+ * will be: switchInputs) counts only the branch it will pick; otherwise
+ * every branch. Each is {node, via} where `via` is the node and input the
+ * trace asked (for packerOf). Null when any branch cannot be traced.
  */
 function leavesOf(node, slotName, depth = 0) {
     if (depth > 8) return null;
@@ -139,9 +141,12 @@ function leavesOf(node, slotName, depth = 0) {
     // those of the bundle it overrides
     if (src.node.type === NODE) return leavesOf(src.node, IN, depth + 1);
     if (!CARRIERS.test(src.node.type)) return [{ node: src.node, via: [node, slotName] }];
-    // a carrier's bundle inputs (a switch's boolean or case list is not one)
-    const inputs = (src.node.inputs ?? []).filter(
-        (i) => i.link != null && (i.type === "*" || i.type === "OBVPM_BUNDLE"));
+    // a switch: the branches that can feed this output (a switch's
+    // boolean or case list is not one); a reroute: its bundle input
+    const names = switchInputs(src.node, src.slot);
+    const inputs = (src.node.inputs ?? []).filter((i) => i.link != null && (names
+        ? names.includes(i.name)
+        : (i.type === "*" || i.type === "OBVPM_BUNDLE")));
     if (!inputs.length) return null;
     const out = [];
     for (const i of inputs) {
@@ -459,6 +464,7 @@ async function rebuild(node, { fit } = {}) {
         node.__obvpmOvBuilding = false;
     }
     if (node.__obvpmOvRemoved) return;
+    node.__obvpmOvLeaves = leafKey(node);
     remember(node, source);
     buildRows(node, source, { fit });
     const again = node.__obvpmOvAgain;
@@ -814,7 +820,35 @@ presetsListeners.add((presetsNode, what) => {
     markPresets(presetsNode);
 });
 
-api.addEventListener("graphChanged", scheduleMarks);
+/** Which nodes the bundle comes from now, as a comparable string. */
+function leafKey(node) {
+    try {
+        return (leavesOf(node, IN) ?? []).map((l) => l.node.id).join(",");
+    } catch (err) {
+        return "";
+    }
+}
+
+/**
+ * A switch upstream may have changed its mind (the timeline's upscale
+ * toggle, a preset's boolean, a case pick): an override whose bundle now
+ * comes from another node rebuilds, showing that node's values.
+ */
+function refreshBranches() {
+    for (const g of allGraphs()) {
+        for (const n of nodesOf(g)) {
+            if (n.type !== NODE || n.__obvpmOvBuilding || n.__obvpmOvRemoved) continue;
+            if (n.__obvpmOvLeaves !== undefined && leafKey(n) !== n.__obvpmOvLeaves) {
+                void rebuild(n);
+            }
+        }
+    }
+}
+
+api.addEventListener("graphChanged", () => {
+    scheduleMarks();
+    refreshBranches();
+});
 
 // ---------------------------------------------------------------------
 // the node

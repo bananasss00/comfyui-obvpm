@@ -370,6 +370,114 @@ export function bundleNamesFor(node, slotName, depth = 0) {
     return lists[0];
 }
 
+// ---------------------------------------------------------------------
+// Values known before a run
+// ---------------------------------------------------------------------
+//
+// A switch picks its branch at run time, but what it picks by is often
+// already settled in the graph: its own widget, a primitive, a Value
+// Presets field, or a node output that simply passes a widget through.
+// Following that value lets a consumer (Override Bundle Values) trace
+// only the branch that will run, instead of every branch.
+//
+// A node whose output is known before a run says so by defining
+// `node.obvpmStaticOutput(slot)`, returning the value (or undefined when
+// it cannot tell). There is no guessing from names: an output called
+// like a widget is not necessarily that widget.
+
+const STATIC_DEPTH = 16;
+const PRIMITIVES = /^Primitive(Boolean|Int|Float|String|StringMultiline)$/;
+const PRESETS_NODE = "ValuePresets (obvpm)";
+const SWITCH = "LazySwitch (obvpm)";
+const MULTI_SWITCH = /^LazySwitch\d \(obvpm\)$/;
+const CASE_SWITCH = /^LazyCaseSwitch(Auto)? \(obvpm\)$/;
+const MAX_CASES = 16;           // mirrors switches.py LazyCaseSwitch.MAX_CASES
+
+/** An input's value as it will be at run time, or undefined. */
+export function staticInput(node, name, depth = 0) {
+    if (!node || depth > STATIC_DEPTH) return undefined;
+    const slot = (node.inputs ?? []).find((i) => i.name === name);
+    if (!slot || slot.link == null) {
+        const w = widget(node, name);
+        return w ? w.value : undefined;
+    }
+    const src = bundleSourceFor(node, name);
+    return src?.node ? staticOutput(src.node, src.slot, depth + 1) : undefined;
+}
+
+/** An output's value as it will be at run time, or undefined. */
+export function staticOutput(node, slot, depth = 0) {
+    if (!node || depth > STATIC_DEPTH) return undefined;
+    if (node.mode === 2 || node.mode === 4) return undefined;   // muted / bypassed
+    if (typeof node.obvpmStaticOutput === "function") {
+        try {
+            return node.obvpmStaticOutput(slot);
+        } catch (err) {
+            return undefined;
+        }
+    }
+    if (PRIMITIVES.test(node.type ?? "")) return widget(node, "value")?.value;
+    if (node.type === "PrimitiveNode") return node.widgets?.[0]?.value;
+    if (isUnbundle(node)) {
+        // a field taken out of a bundle: its value where it went in
+        const out = node.outputs?.[slot];
+        const field = out ? (out.label || out.localized_name || out.name) : "";
+        if (!field) return undefined;
+        const src = bundleSourceFor(node, "in");
+        if (src?.node?.type === PRESETS_NODE) {
+            try {
+                const values = JSON.parse(widget(src.node, "values")?.value || "{}");
+                return values && typeof values === "object" ? values[field] : undefined;
+            } catch (err) {
+                return undefined;
+            }
+        }
+        const packer = packerOf(node, "in");
+        const carrier = packer?.inputs[packer.names.indexOf(field)];
+        return carrier ? staticInput(packer.node, carrier.name, depth + 1) : undefined;
+    }
+    const branches = switchInputs(node, slot, depth);
+    if (branches?.length === 1) return staticInput(node, branches[0], depth + 1);
+    return undefined;
+}
+
+/**
+ * The inputs that can feed a switch's output `slot`: the one it will
+ * pick when that is known before a run, else every candidate. Null for a
+ * node that is not one of our switches.
+ */
+export function switchInputs(node, slot = 0, depth = 0) {
+    const type = node?.type ?? "";
+    const truth = () => {
+        const b = staticInput(node, "boolean", depth + 1);
+        return typeof b === "boolean" ? b : undefined;
+    };
+    if (type === SWITCH) {
+        const b = truth();
+        return b === undefined ? ["on_false", "on_true"] : [b ? "on_true" : "on_false"];
+    }
+    if (MULTI_SWITCH.test(type)) {
+        const i = slot + 1;
+        const b = truth();
+        return b === undefined
+            ? [`on_false_value_${i}`, `on_true_value_${i}`]
+            : [`on_${b ? "true" : "false"}_value_${i}`];
+    }
+    if (CASE_SWITCH.test(type)) {
+        const all = (node.inputs ?? []).map((i) => i.name)
+            .filter((n) => /^on_case_\d+$/.test(n) || n === "fallback");
+        const selected = staticInput(node, "selected", depth + 1);
+        const cases = staticInput(node, "cases", depth + 1);
+        if (typeof selected !== "string" || typeof cases !== "string") return all;
+        // switches.py LazyCaseSwitch._wanted
+        const chosen = selected.trim();
+        if (!chosen) return ["fallback"];
+        const at = LINES(cases).slice(0, MAX_CASES).indexOf(chosen);
+        return [at >= 0 ? `on_case_${at + 1}` : "fallback"];
+    }
+    return null;
+}
+
 /**
  * Move an input so it sits directly above the first `prefix`N socket.
  *
