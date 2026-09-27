@@ -34,7 +34,7 @@ import { widget, bundleSourceFor, packerOf, syncSockets, hideWidget,
 import { describe, fieldWidget, presetsListeners } from "./value_presets.js";
 import { addConfigButton } from "./obvpm_bundle_config.js";
 import { el, TEXT, TITLE, DIM, pushButton, openOverlay } from "./obvpm_ui.js";
-import { constantOf, isOurGetter } from "./obvpm_constants.js";
+import { constantOf, constantOn, isOurGetter, isOurSetter, setMode } from "./obvpm_constants.js";
 
 const NODE = "OverrideBundleValues (obvpm)";
 const PRESETS_NODE = "ValuePresets (obvpm)";
@@ -44,7 +44,10 @@ const IN = "bundle";
 const WIRE = "wire_";
 const MAX_WIRES = 16;           // mirrors overrides.py MAX_WIRES
 const ROW = "__obvpmOverrideRow";
+const SET_W = "set";            // the declared name widget (hidden)
+const CONST_ROW = "set_constant";
 const VALUE_PREFIX = "↳ ";
+const GEAR_TRIM = 12;           // px of default bottom padding under the gear row
 const KNOWN = "obvpm_override_known";
 const MARK_SUFFIX = /  ⤳ overridden.*$/;
 const PRESETS_FIELD = "__obvpmField";      // value_presets.js MARK
@@ -122,29 +125,92 @@ function fieldFromWire(bundleNode, name, index) {
 }
 
 /**
- * The incoming bundle's fields: {kind: "presets"|"bundle", fields,
- * presets (the Value Presets node, when that is the source), values
- * (its current values)}, or null when the wire cannot be traced.
+ * The nodes a bundle wire can come from: one, or -- through the switches
+ * and reroutes that only carry a bundle -- one per branch, since which
+ * branch arrives is not known until it runs. Each is {node, via} where
+ * `via` is the node and input the trace asked (for packerOf). Null when
+ * any branch cannot be traced.
  */
-async function traceSource(node) {
-    const src = bundleSourceFor(node, IN);
+function leavesOf(node, slotName, depth = 0) {
+    if (depth > 8) return null;
+    const src = bundleSourceFor(node, slotName);
     if (!src?.node) return null;
-    if (src.node.type === PRESETS_NODE) {
-        const schema = String(widget(src.node, "schema")?.value ?? "");
+    // another override (wired, or read by its constant): its fields are
+    // those of the bundle it overrides
+    if (src.node.type === NODE) return leavesOf(src.node, IN, depth + 1);
+    if (!CARRIERS.test(src.node.type)) return [{ node: src.node, via: [node, slotName] }];
+    // a carrier's bundle inputs (a switch's boolean or case list is not one)
+    const inputs = (src.node.inputs ?? []).filter(
+        (i) => i.link != null && (i.type === "*" || i.type === "OBVPM_BUNDLE"));
+    if (!inputs.length) return null;
+    const out = [];
+    for (const i of inputs) {
+        const more = leavesOf(src.node, i.name, depth + 1);
+        if (!more) return null;
+        out.push(...more);
+    }
+    return out;
+}
+
+/** One leaf's fields: {kind, presets, values, fields, error, schema}. */
+async function leafFields(leaf) {
+    if (leaf.node.type === PRESETS_NODE) {
+        const schema = String(widget(leaf.node, "schema")?.value ?? "");
         const answer = await describe(schema);
         return {
-            kind: "presets", presets: src.node, values: presetValues(src.node),
+            kind: "presets", presets: [leaf.node], schema,
+            values: presetValues(leaf.node),
             fields: answer.fields ?? [], error: answer.error ?? null,
         };
     }
-    const packer = packerOf(node, IN);
-    if (packer) {
-        return {
-            kind: "bundle", values: {},
-            fields: packer.names.map((name, i) => fieldFromWire(packer.node, name, i)),
-        };
+    const packer = packerOf(...leaf.via);
+    if (!packer) return null;
+    return {
+        kind: "bundle", values: {},
+        fields: packer.names.map((name, i) => fieldFromWire(packer.node, name, i)),
+    };
+}
+
+/** The values every one of the given Value Presets nodes agrees on. */
+function agreedValues(presetsNodes) {
+    const all = presetsNodes.map(presetValues);
+    const out = {};
+    for (const [name, value] of Object.entries(all[0] ?? {})) {
+        const text = JSON.stringify(value);
+        if (all.every((v) => name in v && JSON.stringify(v[name]) === text)) {
+            out[name] = value;
+        }
     }
-    return null;
+    return out;
+}
+
+/**
+ * The incoming bundle's fields: {kind: "presets"|"bundle", fields,
+ * presets (the Value Presets nodes it can come from), values (the
+ * values they all hold)}, or null when the wire cannot be traced.
+ *
+ * Through a switch, the fields are those EVERY branch carries -- the
+ * ones an override is sure to find whichever branch wins (typically two
+ * Value Presets nodes of one schema, e.g. generation and upscale engine
+ * settings). It stays a "presets" source when every branch is one.
+ */
+async function traceSource(node) {
+    const leaves = leavesOf(node, IN);
+    if (!leaves?.length) return null;
+    const parts = await Promise.all(leaves.map(leafFields));
+    if (parts.some((p) => !p)) return null;
+    if (parts.length === 1) return parts[0];
+    const first = parts[0];
+    const common = first.fields.filter((f) =>
+        parts.every((p) => p.fields.some((g) => g.name === f.name)));
+    const presets = parts.every((p) => p.kind === "presets");
+    return {
+        kind: presets ? "presets" : "bundle",
+        presets: presets ? parts.flatMap((p) => p.presets) : [],
+        values: presets ? agreedValues(parts.flatMap((p) => p.presets)) : {},
+        fields: common,
+        error: parts.find((p) => p.error)?.error ?? null,
+    };
 }
 
 /** Remember the traced kinds (not the choice lists), for a load before
@@ -174,8 +240,48 @@ function show(w, on) {
 function short(value) {
     const text = typeof value === "boolean" ? (value ? "true" : "false")
         : String(value ?? "");
-    const tail = text.split(/[\\/]/).pop();
-    return tail.length > 24 ? tail.slice(0, 23) + "…" : tail;
+    return text.split(/[\\/]/).pop();
+}
+
+/** `text` cut (with …) to fit `room` px in the context's font. */
+function fitText(ctx, text, room) {
+    if (ctx.measureText(text).width <= room) return text;
+    let lo = 0, hi = text.length;
+    while (lo < hi) {
+        const mid = Math.ceil((lo + hi) / 2);
+        if (ctx.measureText(text.slice(0, mid) + "…").width <= room) lo = mid;
+        else hi = mid - 1;
+    }
+    return lo ? text.slice(0, lo) + "…" : "…";
+}
+
+/**
+ * The classic toggle draws its value right-aligned, whole: the "bundle:
+ * <value>" text is cut to the room the label leaves, at draw time, so a
+ * wide node shows more of it. (Nodes 2.0 draws the two halves itself and
+ * truncates each with CSS.)
+ */
+function fitToggleText(toggle) {
+    const drawLabel = toggle.drawLabel;
+    const drawValue = toggle.drawValue;
+    if (typeof drawLabel !== "function" || typeof drawValue !== "function") return;
+    toggle.drawLabel = function (ctx, x) {
+        const name = this.displayName ?? this.label ?? this.name ?? "";
+        this.__obvpmLabelEnd = x + ctx.measureText(String(name)).width;
+        return drawLabel.call(this, ctx, x);
+    };
+    toggle.drawValue = function (ctx, x) {
+        const key = this.value ? "on" : "off";
+        const full = this.options?.[key];
+        if (!full || this.__obvpmLabelEnd == null) return drawValue.call(this, ctx, x);
+        const room = x - this.__obvpmLabelEnd - 12;
+        this.options[key] = fitText(ctx, String(full), Math.max(room, 0));
+        try {
+            return drawValue.call(this, ctx, x);
+        } finally {
+            this.options[key] = full;
+        }
+    };
 }
 
 function offLabel(source, name) {
@@ -230,6 +336,7 @@ function buildRows(node, source, { fit } = {}) {
         toggle.value = on;                    // through to the surviving state
         toggle.serialize = false;
         toggle[ROW] = true;
+        fitToggleText(toggle);
         toggle.tooltip = field.hint
             ? "Override " + name + ". " + field.hint
             : "Override the bundle's " + name + ": on, the value under it "
@@ -247,6 +354,7 @@ function buildRows(node, source, { fit } = {}) {
         w[ROW] = true;
         show(w, on);
     }
+    placeLastRows(node);
     writeState(node, st);
     widget(node, WIRES).value = wires.join("\n");
     syncSockets(node, "inputs", WIRE, wires, MAX_WIRES);
@@ -261,6 +369,61 @@ function buildRows(node, source, { fit } = {}) {
         node.setSize?.([before[0], Math.max(before[1], node.computeSize()[1])]);
     }
     node.setDirtyCanvas?.(true, true);
+}
+
+/** Under the fields: set_constant (while on), then the gear, last. */
+function placeLastRows(node) {
+    for (const name of [CONST_ROW, "obvpm_cfg"]) {
+        const at = (node.widgets ?? []).findIndex((w) => w.name === name);
+        if (at >= 0) node.widgets.push(node.widgets.splice(at, 1)[0]);
+    }
+}
+
+// ---------------------------------------------------------------------
+// set to constant
+// ---------------------------------------------------------------------
+
+// As on a Value Presets node: while "set to constant" is on (the config
+// dialog), the last field, just above the gear, is `set_constant` -- the
+// name an Unbundle with "get" or a KJNodes Get reads this node's bundle
+// by. It is not the declared `set` widget: that one stays hidden where
+// widgets_values expects it, and this field (never serialized) writes
+// through to it, which runs the setter's rename handling
+// (obvpm_constants.js asks this node to show the name its own way).
+
+function showConstantRow(node, show) {
+    const real = widget(node, SET_W);
+    let row = widget(node, CONST_ROW);
+    if (!show || !real) {
+        if (row) {
+            row.onRemove?.();
+            node.widgets.splice(node.widgets.indexOf(row), 1);
+        }
+    } else {
+        if (!row) {
+            row = node.addWidget("string", CONST_ROW, String(real.value ?? ""), (v) => {
+                real.value = String(v ?? "").trim();
+                real.callback?.(real.value);
+                // the setter may have made it unique (name_0, ...)
+                if (row.value !== real.value) row.value = real.value;
+            });
+            row.serialize = false;
+            row.tooltip = "The name an Unbundle with 'get' or a KJNodes Get "
+                + "reads this bundle by. Turn it off in the config dialog.";
+        }
+        row.value = String(real.value ?? "");     // through to the surviving state
+    }
+    placeLastRows(node);
+    if (!isLoading(node)) fitHeight(node);
+    notifyVue(node);
+    node.setDirtyCanvas?.(true, true);
+}
+
+/** A starting name for the constant, from the node's title. */
+function constantNameFrom(node) {
+    const slug = String(node.title ?? "").replace(/\s*\(obvpm\)\s*$/i, "").toLowerCase()
+        .replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+    return slug || "override";
 }
 
 function setOn(node, name, on) {
@@ -379,10 +542,45 @@ async function openConfig(node) {
             el("span", { color: DIM, font: "12px sans-serif" }, typeText(field)));
         list.appendChild(row);
     }
+    // Set to constant, as on a Value Presets node (config -> Set)
+    const nameW = widget(node, SET_W);
+    let constant = constantOn(node);
+    const setBox = el("div", { display: "flex", flexDirection: "column", gap: "6px",
+                               marginTop: "6px" });
+    const setCheck = el("input");
+    setCheck.type = "checkbox";
+    setCheck.checked = constant;
+    setCheck.disabled = !nameW;
+    setCheck.addEventListener("change", () => { constant = setCheck.checked; });
+    const setRow = el("label", { display: "flex", alignItems: "center", gap: "8px",
+                                 font: TEXT, cursor: "pointer" });
+    setRow.append(setCheck, el("span", { flex: "1" }, "set this bundle to a constant"));
+    setBox.append(
+        el("div", { font: "600 14px sans-serif" }, "Set to constant"),
+        el("div", { color: DIM, font: "12px sans-serif" },
+            nameW
+                ? "On, this node's bundle (with the overrides) is a constant: an "
+                  + "Unbundle with 'get' or a KJNodes Get reads it by NAME, without "
+                  + "a wire. The name is the node's set_constant field, its last "
+                  + "one; set or change it there."
+                : "This node has no name field yet: restart ComfyUI after "
+                  + "updating comfyui-obvpm (a node added before the update may "
+                  + "need to be added again)."),
+        setRow);
+    panel.append(setBox);
+
     const bar = el("div", { display: "flex", justifyContent: "flex-end", gap: "8px" });
     bar.append(
         pushButton("Cancel", () => close()),
         pushButton("OK", () => {
+            if (nameW && constant !== constantOn(node)) {
+                // a name to start from; the node's field changes it, and
+                // setMode makes it unique among the setters in scope
+                if (constant && !String(nameW.value ?? "").trim()) {
+                    nameW.value = constantNameFrom(node);
+                }
+                setMode(node, constant);
+            }
             const next = readState(node);
             next.fields = names.filter((n) => chosen.has(n));
             next.on = next.on.filter((n) => chosen.has(n));
@@ -467,6 +665,18 @@ function pathsFrom(presetsNode) {
             if (link) visit(graph, link.target_id, link.target_slot, acc, depth + 1);
         }
     };
+    // a setter's bundle goes on at every getter of its constant
+    const toGetters = (setter, acc, depth) => {
+        const key = constantOf(setter);
+        if (!key) return;
+        for (const g of allGraphs()) {
+            for (const n of nodesOf(g)) {
+                if (n === setter || constantOf(n) !== key) continue;
+                if (n.type === "GetNode") fromOutput(n, 0, acc, depth + 1);
+                else if (isOurGetter(n)) ends.push(acc);
+            }
+        }
+    };
     const visit = (graph, id, slot, acc, depth) => {
         if (depth > 64) return;
         const key = `${graph.id ?? ""}:${id}:${slot}:${[...acc].sort().join(",")}`;
@@ -485,7 +695,10 @@ function pathsFrom(presetsNode) {
             if (node.mode === 4) return fromOutput(node, 0, acc, depth);  // bypassed
             const active = activeFields(node);
             note(node, active);
-            return fromOutput(node, 0, new Set([...acc, ...active]), depth);
+            const after = new Set([...acc, ...active]);
+            fromOutput(node, 0, after, depth);
+            if (isOurSetter(node)) toGetters(node, after, depth);
+            return;
         }
         if (node.isSubgraphNode?.() && node.subgraph) {
             const sub = node.subgraph;
@@ -496,18 +709,7 @@ function pathsFrom(presetsNode) {
             }
             return;
         }
-        if (node.type === "SetNode") {
-            const key2 = constantOf(node);
-            let any = false;
-            for (const g of allGraphs()) {
-                for (const n of nodesOf(g)) {
-                    if (constantOf(n) !== key2 || n === node) continue;
-                    if (n.type === "GetNode") { any = true; fromOutput(n, 0, acc, depth); }
-                    else if (isOurGetter(n)) { any = true; ends.push(acc); }
-                }
-            }
-            return;
-        }
+        if (node.type === "SetNode") return toGetters(node, acc, depth);
         if (CARRIERS.test(node.type)) {
             (node.outputs ?? []).forEach((out, i) => {
                 if (out.type === "*" || out.type === "OBVPM_BUNDLE") fromOutput(node, i, acc, depth);
@@ -517,6 +719,9 @@ function pathsFrom(presetsNode) {
         ends.push(acc);                                 // a node that reads it
     };
     fromOutput(presetsNode, 0, new Set(), 0);
+    // "set to constant" on the preset node itself: no wire, but the
+    // getters of its constant read it all the same
+    if (isOurSetter(presetsNode)) toGetters(presetsNode, new Set(), 0);
     return { ends, byField };
 }
 
@@ -580,7 +785,7 @@ function overridesOf(presetsNode) {
     for (const g of allGraphs()) {
         for (const n of nodesOf(g)) {
             if (n.type !== NODE) continue;
-            if (bundleSourceFor(n, IN)?.node === presetsNode) out.push(n);
+            if (leavesOf(n, IN)?.some((l) => l.node === presetsNode)) out.push(n);
         }
     }
     return out;
@@ -592,10 +797,11 @@ presetsListeners.add((presetsNode, what) => {
         for (const n of overridesOf(presetsNode)) void rebuild(n);
     } else {
         // a value moved: the rows' "bundle: ..." text follows it
-        const values = presetValues(presetsNode);
         for (const n of overridesOf(presetsNode)) {
             const source = n.__obvpmOvSource;
-            if (source?.kind === "presets") source.values = values;
+            if (source?.kind === "presets" && source.presets?.length) {
+                source.values = agreedValues(source.presets);
+            }
             for (const w of n.widgets ?? []) {
                 if (w[ROW] && w.type === "toggle") {
                     (w.options ??= {}).off = offLabel(source, w.name);
@@ -624,6 +830,10 @@ app.registerExtension({
             const r = onNodeCreated?.apply(this, arguments);
             hideWidget(this, STATE);
             hideWidget(this, WIRES);
+            // "set to constant": the name shows as set_constant, last
+            const node = this;
+            this.__obvpmNameProxy = (show) => showConstantRow(node, show);
+            showConstantRow(this, constantOn(this));
             // the declared wire_N pool shows only as fields ask for it
             syncSockets(this, "inputs", WIRE, [], MAX_WIRES);
             addConfigButton(this, openConfig);
@@ -635,6 +845,19 @@ app.registerExtension({
                 void rebuild(this, { fit: true });
             }
             return r;
+        };
+
+        // The gear row is the last one, and LiteGraph's default height
+        // pads under it as if it were a full widget row: it sat 17 px
+        // off the bottom edge where Bundle/Unbundle's sits 5 px off.
+        const computeSize = nodeType.prototype.computeSize;
+        nodeType.prototype.computeSize = function () {
+            const size = computeSize.apply(this, arguments);
+            const gear = (this.widgets ?? []).at(-1);
+            if (gear?.name === "obvpm_cfg" && !gear.hidden) {
+                size[1] = Math.max(size[1] - GEAR_TRIM, 0);
+            }
+            return size;
         };
 
         // configure() replays the saved links; nothing may resize then
@@ -664,6 +887,8 @@ app.registerExtension({
             if (type === 1 && !isLoading(this)) {
                 if (this.inputs?.[index]?.name === IN) void rebuild(this, { fit: true });
                 else scheduleMarks();           // a wired field came or went
+            } else if (type === 2 && !isLoading(this)) {
+                scheduleMarks();                // a reader came or went
             }
             return r;
         };

@@ -140,6 +140,15 @@ class OverrideBundleValues:
                 "tooltip": "A value for the field this socket is named "
                            "after; it replaces the bundle's. Unwired, the "
                            "bundle's own value passes."})
+        # LAST: widgets_values is positional, and a save from before it
+        # existed holds the two above. The constant's name while "set to
+        # constant" is on (the config dialog), as on a Value Presets
+        # node -- see web/obvpm_constants.js.
+        optional["set"] = ("STRING", {
+            "default": "",
+            "tooltip": "The name other nodes get this bundle by (an "
+                       "Unbundle with 'get', or a KJNodes Get). Turned on "
+                       "in the config dialog."})
         return {
             "required": {
                 "bundle": (BUNDLE, {
@@ -149,5 +158,7 @@ class OverrideBundleValues:
             "optional": optional,
         }
 
-    def override(self, bundle, state="{}", wires="", **wired):
+    def override(self, bundle, state="{}", wires="", set="", **wired):
+        # `set` is a name for the browser to join nodes by; nothing to do
+        # with it here
         return (apply_overrides(bundle, state, wires, wired),)

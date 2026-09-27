@@ -41,6 +41,11 @@ export const UNBUNDLE = "Unbundle (obvpm)";
 // A Value Presets node can set its bundle by name too (config -> Set);
 // it keeps its own title, which names what it holds.
 export const VALUE_PRESETS = "ValuePresets (obvpm)";
+// So can an Override Bundle Values node (its config dialog), keeping its
+// title the same way.
+export const OVERRIDE = "OverrideBundleValues (obvpm)";
+// The setters that keep their own title and show the name as a field.
+const OWN_TITLE = new Set([VALUE_PRESETS, OVERRIDE]);
 const KJ_SET = "SetNode";
 const KJ_GET = "GetNode";
 const BUNDLE_TYPE = "OBVPM_BUNDLE";   // see h3/wiretypes.py
@@ -79,7 +84,7 @@ function nameWidget(node) {
 
 /** A Bundle or Value Presets node with its set option on. */
 export function isOurSetter(node) {
-    return (node?.type === BUNDLE || node?.type === VALUE_PRESETS)
+    return (node?.type === BUNDLE || OWN_TITLE.has(node?.type))
         && constantOn(node);
 }
 
@@ -240,7 +245,7 @@ function titleFor(node) {
 
 /** On: the title follows the name. The replaced title is kept. */
 function retitle(node) {
-    if (!constantOn(node) || node.type === VALUE_PRESETS) return;
+    if (!constantOn(node) || OWN_TITLE.has(node.type)) return;
     node.properties ??= {};
     if (node.properties[TITLE_PROP] == null) {
         node.properties[TITLE_PROP] = node.title ?? "";
@@ -254,7 +259,7 @@ function retitle(node) {
 
 /** Off: the title it had before. */
 function restoreTitle(node) {
-    if (node.type === VALUE_PRESETS) return;
+    if (OWN_TITLE.has(node.type)) return;
     const kept = node.properties?.[TITLE_PROP];
     if (kept == null) return;
     delete node.properties[TITLE_PROP];
@@ -783,7 +788,7 @@ export function fillConstants(output, root) {
         if (depth > 16) return;
         for (const node of nodesOf(frame.graph)) {
             if (node.type === BUNDLE || node.type === UNBUNDLE
-                    || node.type === VALUE_PRESETS) {
+                    || OWN_TITLE.has(node.type)) {
                 const id = [...frame.path, node.id].join(":");
                 const entry = output[id];
                 // A name with its option off means nothing: send none,
@@ -959,7 +964,7 @@ app.registerExtension({
         // Unbundle is set up -- with its option off it is exactly the
         // node it always was.
         const cls = node.comfyClass ?? node.constructor?.comfyClass ?? node.type;
-        if (cls === BUNDLE || cls === VALUE_PRESETS) setup(node, "set");
+        if (cls === BUNDLE || OWN_TITLE.has(cls)) setup(node, "set");
         else if (cls === UNBUNDLE) setup(node, "get");
     },
     setup() {

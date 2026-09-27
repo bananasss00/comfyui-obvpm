@@ -177,6 +177,15 @@ class Wired(unittest.TestCase):
         self.assertEqual(sorted(k for k in spec["optional"] if k.startswith("wire_")),
                          sorted("wire_%d" % i for i in range(1, ov.MAX_WIRES + 1)))
 
+    def test_set_is_the_last_input_and_changes_nothing(self):
+        # widgets_values is positional: a save from before `set` holds
+        # state and wires only, so the new widget must come after them
+        spec = ov.OverrideBundleValues.INPUT_TYPES()
+        self.assertEqual(list(spec["optional"])[-1], "set")
+        (a,) = ov.OverrideBundleValues().override({"steps": 3}, "{}", "")
+        (b,) = ov.OverrideBundleValues().override({"steps": 3}, "{}", "", set="engine")
+        self.assertEqual(a, b)
+
 
 if __name__ == "__main__":
     unittest.main()
