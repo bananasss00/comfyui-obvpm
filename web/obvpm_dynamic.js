@@ -418,6 +418,12 @@ export function staticOutput(node, slot, depth = 0) {
     }
     if (PRIMITIVES.test(node.type ?? "")) return widget(node, "value")?.value;
     if (node.type === "PrimitiveNode") return node.widgets?.[0]?.value;
+    if (node.type === "ComfyNotNode") {
+        // the core Not: Python's `not value`, for the plain values whose
+        // truth JS reads the same way
+        const v = staticInput(node, "value", depth + 1);
+        return ["boolean", "number", "string"].includes(typeof v) ? !v : undefined;
+    }
     if (isUnbundle(node)) {
         // a field taken out of a bundle: its value where it went in
         const out = node.outputs?.[slot];

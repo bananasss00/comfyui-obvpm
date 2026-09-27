@@ -30,11 +30,12 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { widget, bundleSourceFor, packerOf, syncSockets, hideWidget,
-         originOf, linkById, notifyVue, switchInputs } from "./obvpm_dynamic.js";
+         originOf, linkById, notifyVue, switchInputs, staticInput } from "./obvpm_dynamic.js";
 import { describe, fieldWidget, presetsListeners } from "./value_presets.js";
 import { addConfigButton } from "./obvpm_bundle_config.js";
 import { el, TEXT, TITLE, DIM, pushButton, openOverlay } from "./obvpm_ui.js";
-import { constantOf, constantOn, isOurGetter, isOurSetter, setMode } from "./obvpm_constants.js";
+import { constantOf, constantOn, isOurGetter, isOurSetter, isUnbundle, setMode }
+    from "./obvpm_constants.js";
 
 const NODE = "OverrideBundleValues (obvpm)";
 const PRESETS_NODE = "ValuePresets (obvpm)";
@@ -631,6 +632,17 @@ function linksOf(graph) {
     return typeof links.values === "function" ? [...links.values()] : Object.values(links);
 }
 
+/**
+ * An output slot's link ids. Usually an array -- but a slot restored from
+ * a saved workflow can hold them as {"0": id, ...} (the frontend's array
+ * properties come back that way), which for...of cannot walk.
+ */
+function linkIds(slot) {
+    const links = slot?.links;
+    if (!links) return [];
+    return Array.isArray(links) ? links : Object.values(links);
+}
+
 function wrapperOf(sub) {
     const found = [];
     for (const g of allGraphs()) {
@@ -653,9 +665,18 @@ function activeFields(node) {
  * KJ Set/Get pairs and the switches that only carry a bundle; an
  * override node adds the fields it replaces and the walk goes on past
  * it (for the others).
+ *
+ * With `prune`, a switch whose choice is known before the run
+ * (switchInputs) passes the bundle on only from the input it will pick;
+ * a path that arrives on another input ends there, in `dead`; so does
+ * one that reaches a node a Mute If gate will block (`blocked`, from
+ * blockedNodes). And an Unbundle is followed on to whatever reads its
+ * fields, since the preset is only used if one of THOSE runs. The marks
+ * walk without it: a field is overridden whichever branch runs.
  */
-function pathsFrom(presetsNode) {
+function pathsFrom(presetsNode, { prune = false, blocked = null } = {}) {
     const ends = [];
+    const dead = [];
     const byField = new Map();          // field -> override node titles
     const seen = new Set();
     const note = (node, fields) => {
@@ -666,7 +687,7 @@ function pathsFrom(presetsNode) {
     };
     const fromOutput = (node, slot, acc, depth) => {
         const graph = node.graph;
-        for (const id of node.outputs?.[slot]?.links ?? []) {
+        for (const id of linkIds(node.outputs?.[slot])) {
             const link = linkById(graph, id);
             if (link) visit(graph, link.target_id, link.target_slot, acc, depth + 1);
         }
@@ -679,9 +700,31 @@ function pathsFrom(presetsNode) {
             for (const n of nodesOf(g)) {
                 if (n === setter || constantOf(n) !== key) continue;
                 if (n.type === "GetNode") fromOutput(n, 0, acc, depth + 1);
-                else if (isOurGetter(n)) ends.push(acc);
+                else if (isOurGetter(n)) {
+                    if (prune) readOn(n, acc, depth + 1);
+                    else ends.push(acc);
+                }
             }
         }
+    };
+    // prune: an Unbundle's fields go on to their readers
+    // prune: a reader passes the value on to ITS readers, to the end of
+    // the chain -- the value is used only if some chain gets there with
+    // no blocked node on the way (a reader that is not blocked itself
+    // can still feed only nodes that are, like a sampler's denoise)
+    const readOn = (node, acc, depth) => {
+        if (blocked?.has(node)) return void dead.push(acc);
+        let onward = false;
+        (node.outputs ?? []).forEach((out, i) => {
+            if (!linkIds(out).length) return;
+            onward = true;
+            fromOutput(node, i, acc, depth);
+        });
+        if (isOurSetter(node)) {
+            onward = true;
+            toGetters(node, acc, depth);
+        }
+        if (!onward) ends.push(acc);            // the end of a chain: used
     };
     const visit = (graph, id, slot, acc, depth) => {
         if (depth > 64) return;
@@ -699,6 +742,7 @@ function pathsFrom(presetsNode) {
         if (node.mode === 2) return;                    // muted: nothing reads on
         if (node.type === NODE) {
             if (node.mode === 4) return fromOutput(node, 0, acc, depth);  // bypassed
+            if (prune && blocked?.has(node)) return void dead.push(acc);
             const active = activeFields(node);
             note(node, active);
             const after = new Set([...acc, ...active]);
@@ -716,19 +760,219 @@ function pathsFrom(presetsNode) {
             return;
         }
         if (node.type === "SetNode") return toGetters(node, acc, depth);
+        if (prune && isUnbundle(node)) return readOn(node, acc, depth);
         if (CARRIERS.test(node.type)) {
+            const arrived = node.inputs?.[slot]?.name;
+            let onward = false;
             (node.outputs ?? []).forEach((out, i) => {
-                if (out.type === "*" || out.type === "OBVPM_BUNDLE") fromOutput(node, i, acc, depth);
+                if (out.type !== "*" && out.type !== "OBVPM_BUNDLE") return;
+                const names = prune ? switchInputs(node, i) : null;
+                if (names && !names.includes(arrived)) return;   // not picked
+                onward = true;
+                fromOutput(node, i, acc, depth);
             });
+            if (!onward) dead.push(acc);
             return;
         }
+        if (prune) return readOn(node, acc, depth);
         ends.push(acc);                                 // a node that reads it
     };
     fromOutput(presetsNode, 0, new Set(), 0);
     // "set to constant" on the preset node itself: no wire, but the
     // getters of its constant read it all the same
     if (isOurSetter(presetsNode)) toGetters(presetsNode, new Set(), 0);
-    return { ends, byField };
+    return { ends, byField, dead };
+}
+
+// ---------------------------------------------------------------------
+// "not used by the next run": the Value Presets node fades
+// ---------------------------------------------------------------------
+//
+// A preset whose every path ends where the next run will not go is drawn
+// faded, so the one in use stands out without panning to the switch:
+// - at a switch that will pick another branch (its choice known before
+//   the run: the timeline's upscale toggle choosing between generation
+//   and upscale engine settings), or
+// - at a node a Mute If gate will block (its `mute` known before the run:
+//   the upscale group's gate while generating).
+// Only with that evidence: a new node, an unwired one, or one behind a
+// switch or gate decided at run time, is drawn as usual. Nothing is
+// saved; the node still edits.
+
+const INACTIVE_ATTR = "data-obvpm-inactive";
+const FADE = 0.4;               // the node's opacity while not used
+const GATE = "MuteGate (obvpm)";
+const inactive = new Set();
+
+/**
+ * The nodes a Mute If gate will block in the next run: everything
+ * downstream of a gate whose `mute` is known to be true (ExecutionBlocker
+ * skips every node that receives it, and their outputs carry it on).
+ * Through subgraphs, Set/Get pairs and set-to-constant setters; a switch
+ * passes the block on only from the branch it will pick, and one whose
+ * choice is not known before the run stops it (it may not arrive).
+ */
+function blockedNodes() {
+    const out = new Set();
+    const seen = new Set();
+    const flow = (node, slot) => {
+        const graph = node.graph;
+        for (const id of linkIds(node.outputs?.[slot])) {
+            const link = linkById(graph, id);
+            if (link) reach(graph, link.target_id, link.target_slot);
+        }
+    };
+    const flowAll = (node) => {
+        (node.outputs ?? []).forEach((_o, i) => flow(node, i));
+        if (isOurSetter(node) || node.type === "SetNode") {
+            const key = constantOf(node);
+            for (const g of allGraphs()) {
+                for (const n of nodesOf(g)) {
+                    if (n === node || !key || constantOf(n) !== key || out.has(n)) continue;
+                    if (n.type === "GetNode" || isOurGetter(n)) {
+                        out.add(n);
+                        flowAll(n);
+                    }
+                }
+            }
+        }
+    };
+    const reach = (graph, id, slot) => {
+        const key = `${graph.id ?? ""}:${id}:${slot}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        if (graph.outputNode && id === graph.outputNode.id) {
+            const wrapper = wrapperOf(graph);
+            if (wrapper) flow(wrapper, slot);
+            return;
+        }
+        const node = graph.getNodeById?.(id);
+        if (!node || node.mode === 2) return;
+        if (node.isSubgraphNode?.() && node.subgraph) {
+            const sub = node.subgraph;
+            for (const link of linksOf(sub)) {
+                if (link.origin_id === sub.inputNode?.id && link.origin_slot === slot) {
+                    reach(sub, link.target_id, link.target_slot);
+                }
+            }
+            return;
+        }
+        const arrived = node.inputs?.[slot]?.name;
+        const picks = (node.outputs ?? []).map((_o, i) => switchInputs(node, i));
+        if (picks.some((p) => p)) {
+            // a switch: blocked only where it will pick the blocked input
+            picks.forEach((p, i) => {
+                if (p?.length === 1 && p[0] === arrived) flow(node, i);
+            });
+            return;
+        }
+        if (out.has(node)) return;
+        out.add(node);
+        flowAll(node);
+    };
+    for (const g of allGraphs()) {
+        for (const n of nodesOf(g)) {
+            if (n.type !== GATE || n.mode === 2 || n.mode === 4) continue;
+            if (staticInput(n, "mute") === true) flow(n, 0);
+        }
+    }
+    return out;
+}
+
+function isInactive(presetsNode, blocked) {
+    if (presetsNode.mode === 2 || presetsNode.mode === 4) return false;
+    const { ends, dead } = pathsFrom(presetsNode, { prune: true, blocked });
+    return ends.length === 0 && dead.length > 0;
+}
+
+/** Nodes 2.0: the node is a DOM element. */
+function vueElement(node) {
+    return document.querySelector(`[data-node-id="${CSS.escape(String(node.id))}"]`);
+}
+
+let fadeStyle = null;
+function ensureFadeStyle() {
+    if (fadeStyle) return;
+    fadeStyle = document.createElement("style");
+    // !important: the element's own inline opacity (mute, bypass) is
+    // rewritten by Vue on every style patch -- a move, a resize
+    fadeStyle.textContent =
+        `[data-node-id][${INACTIVE_ATTR}] { opacity: ${FADE} !important; }`;
+    document.head.appendChild(fadeStyle);
+}
+
+/** Put each node's fade in step with the set (both renderers). */
+function paintFades() {
+    const vue = typeof LiteGraph !== "undefined" && LiteGraph.vueNodesMode;
+    for (const g of allGraphs()) {
+        for (const n of nodesOf(g)) {
+            if (n.type !== PRESETS_NODE) continue;
+            const off = inactive.has(n);
+            // classic: its DOM widgets float above the canvas
+            for (const w of n.widgets ?? []) {
+                const elm = w.element ?? w.inputEl;
+                if (!elm) continue;
+                const want = off && !vue ? String(FADE) : "";
+                if (elm.style.opacity !== want) elm.style.opacity = want;
+            }
+            if (vue) {
+                const elm = vueElement(n);
+                if (!elm) continue;
+                if (off && !elm.hasAttribute(INACTIVE_ATTR)) {
+                    ensureFadeStyle();
+                    elm.setAttribute(INACTIVE_ATTR, "");
+                } else if (!off && elm.hasAttribute(INACTIVE_ATTR)) {
+                    elm.removeAttribute(INACTIVE_ATTR);
+                }
+            }
+        }
+    }
+}
+
+function refreshActivity() {
+    inactive.clear();
+    let blocked = new Set();
+    try {
+        blocked = blockedNodes();
+    } catch (err) {
+        console.error("[obvpm-override] could not trace the gates:", err);
+    }
+    for (const g of allGraphs()) {
+        for (const n of nodesOf(g)) {
+            if (n.type !== PRESETS_NODE) continue;
+            try {
+                if (isInactive(n, blocked)) inactive.add(n);
+            } catch (err) {
+                console.error("[obvpm-override] could not trace", n.id, err);
+            }
+        }
+    }
+    paintFades();
+    app.canvas?.setDirty?.(true, true);
+}
+
+/**
+ * Classic: the node is drawn with every alpha it sets scaled by FADE.
+ * One globalAlpha up front is not enough -- drawNode puts it back to 1
+ * before the widgets -- so for the length of this one node's draw the
+ * context's globalAlpha is an own property that scales what is set.
+ */
+const ALPHA = Object.getOwnPropertyDescriptor(
+    globalThis.CanvasRenderingContext2D?.prototype ?? {}, "globalAlpha");
+
+function drawFaded(draw, canvas, node, ctx) {
+    if (!ALPHA?.set || !inactive.has(node)) return draw.call(canvas, node, ctx);
+    Object.defineProperty(ctx, "globalAlpha", {
+        configurable: true,
+        get() { return ALPHA.get.call(ctx) / FADE; },
+        set(v) { ALPHA.set.call(ctx, v * FADE); },
+    });
+    try {
+        ctx.globalAlpha = 1;
+        return draw.call(canvas, node, ctx);
+    } finally {
+        delete ctx.globalAlpha;
+    }
 }
 
 function markPresets(presetsNode) {
@@ -782,6 +1026,8 @@ function scheduleMarks() {
     marksTimer = setTimeout(() => {
         marksTimer = null;
         refreshMarks();
+        refreshActivity();
+        refreshBranches();
     }, 60);
 }
 
@@ -845,10 +1091,16 @@ function refreshBranches() {
     }
 }
 
-api.addEventListener("graphChanged", () => {
-    scheduleMarks();
-    refreshBranches();
-});
+api.addEventListener("graphChanged", scheduleMarks);
+// graphChanged comes from the change tracker, which looks on a window
+// mouseup -- and a button in a node's DOM (the timeline's upscale
+// toggle) gets pointer events whose default the frontend cancels, so no
+// mouseup ever comes and the fades waited for the next unrelated click.
+// Every pointerup and keyup, in the capture phase (nothing can stop it
+// there), schedules the same refresh; the click that follows the
+// pointerup has changed the value by the time it runs.
+window.addEventListener("pointerup", scheduleMarks, true);
+window.addEventListener("keyup", scheduleMarks, true);
 
 // ---------------------------------------------------------------------
 // the node
@@ -856,6 +1108,29 @@ api.addEventListener("graphChanged", () => {
 
 app.registerExtension({
     name: "obvpm.override_values",
+    setup() {
+        const canvas = app.canvas;
+        if (canvas && !canvas.__obvpmShades) {
+            canvas.__obvpmShades = true;
+            const drawNode = canvas.drawNode;
+            canvas.drawNode = function (node, ctx) {
+                return drawFaded(drawNode, this, node, ctx);
+            };
+            // Nodes 2.0: a remounted node element lost its attribute
+            const fg = canvas.onDrawForeground;
+            canvas.onDrawForeground = function (ctx, area) {
+                const r = fg?.call(this, ctx, area);
+                if (inactive.size && LiteGraph.vueNodesMode) {
+                    try { paintFades(); } catch (err) { /* never break the canvas */ }
+                }
+                return r;
+            };
+        }
+    },
+    // a workflow with no override node still shades its presets
+    afterConfigureGraph() {
+        scheduleMarks();
+    },
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData?.name !== NODE) return;
 
