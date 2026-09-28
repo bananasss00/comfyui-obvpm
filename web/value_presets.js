@@ -15,6 +15,7 @@ import { STAR, typeIdOf, cleanTypeId, isUserLabel, bareName,
          onUserPresetsChange, exportText, parseImport, mergePresets,
          download } from "./value_presets_user.js";
 import { constantOn, setMode } from "./obvpm_constants.js";
+import { restoreRows, restoreWrites } from "./value_presets_restore.js";
 
 /**
  * Value Presets: a control per schema field, and named sets of them.
@@ -680,6 +681,16 @@ app.registerExtension({
             return r;
         };
 
+        // "load settings" (comfyui-obvpm-timeline) asks the node itself
+        // what loading a take's values would change, so a person decides
+        // per field and per preset instead of on raw widget text.
+        nodeType.prototype.obvpmRestoreRows = function (saved) {
+            return restoreRowsFor(this, saved);
+        };
+        nodeType.prototype.obvpmRestoreApply = function (saved, keys) {
+            return restoreApplyTo(this, saved, keys);
+        };
+
         const menu = nodeType.prototype.getExtraMenuOptions;
         nodeType.prototype.getExtraMenuOptions = function (_, options) {
             const r = menu?.apply(this, arguments);
@@ -1289,6 +1300,61 @@ async function applyPreset(node) {
     for (const key of Object.keys(saved)) next[key] = saved[key];
     writeJson(node, VALUES, next);
     await rebuild(node, true);
+}
+
+// ------------------------------------------------ load settings (timeline)
+
+// The declared widgets a take's workflow can bring back. Not `names`: it
+// is rebuilt from the schema on every build.
+const RESTORED = [SCHEMA, PRESET, VALUES, PRESETS, SET_W];
+
+function storedNow(node) {
+    return Object.fromEntries(RESTORED.map((n) => [n, widget(node, n)?.value]));
+}
+
+/** A widget a wire feeds (its value is dead), or one this node lacks. */
+function notRestorable(node, name) {
+    if (!widget(node, name)) return true;
+    return (node.inputs ?? []).some(
+        (s) => (s.widget?.name === name || s.name === name) && s.link != null);
+}
+
+/** "load settings" rows for this node: see value_presets_restore.js. */
+function restoreRowsFor(node, saved) {
+    const fields = new Set(Object.keys(node.__obvpmFieldMap ?? {}));
+    return restoreRows(storedNow(node), saved ?? {}, fields,
+                       (name) => notRestorable(node, name));
+}
+
+/**
+ * Apply the ticked rows. The chooser's label is set WITHOUT applyPreset:
+ * that would put the preset's stored values over the take's. Workflow
+ * presets go through writeWorkflowPresets, so nodes sharing the Preset
+ * Type Id keep the same list. One forced rebuild reads it all back.
+ */
+function restoreApplyTo(node, saved, keys) {
+    const writes = restoreWrites(storedNow(node), saved ?? {}, keys);
+    if (!Object.keys(writes).length) return false;
+    if (SCHEMA in writes) widget(node, SCHEMA).value = writes[SCHEMA];
+    if (PRESETS in writes) {
+        let presets = null;
+        try {
+            presets = JSON.parse(writes[PRESETS] || "{}");
+        } catch (err) { /* unreadable: stored as it came, like the load would */ }
+        if (presets && typeof presets === "object") writeWorkflowPresets(node, presets);
+        else widget(node, PRESETS).value = writes[PRESETS];
+    }
+    if (PRESET in writes) widget(node, PRESET).value = writes[PRESET];
+    if (VALUES in writes) widget(node, VALUES).value = writes[VALUES];
+    if (SET_W in writes) {
+        const w = widget(node, SET_W);
+        w.value = writes[SET_W];
+        // the setter's own rename handling (obvpm_constants.js)
+        w.callback?.(w.value, app.canvas, node);
+    }
+    trace(node, "restored", Object.keys(writes).join(", "));
+    void rebuild(node, true);
+    return true;
 }
 
 /**

@@ -6,6 +6,10 @@ ComfyUI nodes to save time and keep your workflows tidy. Bundle multiple wires i
 
 **Also check out my new Timeline node:**  https://github.com/chanon/comfyui-obvpm-timeline It not only lets you extend videos seamlessly, but also **prepend, bridge and even create seamless loops with motion context**!
 
+### Latest HEAD
+
+- Value Presets: works with the timeline's **load settings** ([comfyui-obvpm-timeline](https://github.com/chanon/comfyui-obvpm-timeline)): each changed value is its own row; a changed schema, and each workflow preset that differs, is one row, unticked by default, with what changed inside it behind a collapsed toggle.
+
 ### 0.2.10-preview.1 (2026-09-28)
 
 - Value Presets: the **schema** button is now **config**, with three pages: Presets, Schema (as before) and Set.
