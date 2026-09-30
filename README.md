@@ -28,21 +28,7 @@ ComfyUI nodes to save time and keep your workflows tidy. Bundle multiple wires i
 - Value Presets: fixed the node staying blank ("still waiting for the schema from the server") in workflows where something keeps the canvas redrawing, such as a pack with animated links or live monitors (issue #12). Each redraw asked for the fields again while the answer was on its way, and the answer was then thrown away as out of date, over and over.
 - Value Presets: fixed a false red "its graph holds ANOTHER node under id …" line over preset nodes after a workflow was loaded again (or undone, or its tab switched) while the nodes were still starting up. It came from the node the load replaced, not the one on screen, and showed whenever the node was not selected.
 
-### 0.2.8 (2026-09-26)
-
-- Compatibility Check: new **Message & Links** in the details, for workflow authors: a short text and a list of links the node shows when the install can run the workflow (for example a tutorial video, a Discord, a support page). Links open only on trusted sites (GitHub, GitLab, Hugging Face, Civitai, YouTube, Discord, Patreon and a few more), with the real site shown next to each. See [Message & Links](#message--links).
-
-### 0.2.7 (2026-09-25)
-
-- Bundle / Unbundle: new **Set as a constant** / **Get from a constant** option in the ⚙ settings. Turned on, the node sets or gets a bundle by a constant name instead of a wire, like KJNodes Set/Get, and works together with them: a KJNodes Get can read a Bundle's set, and an Unbundle's get can read a KJNodes Set that carries a bundle. Collapsed, the node then shows "Set name" / "Get name". Off by default, so existing workflows are unchanged. See [Set / get by name](#set--get-by-name).
-- Unbundle: the ⚙ settings dialog now shows, for each field, whether the bundle on the wire (or the constant) has it: green yes, red no (that output gives None), grey when it can't be traced, with the reason.
-- Bundle / Unbundle: the collapse (−) and settings (⚙) buttons are now drawn as icons instead of text characters, so they are the same size on every system (on some installs the ⚙ came out tiny). The Compatibility Check's settings button got the same icon.
-- Bundle / Unbundle: fixed the node pack badge showing above the nodes again on ComfyUI frontend 1.53 in the classic (non Nodes 2.0) view.
-- Value Presets: if the node can't build its fields, it now says why on the node instead of staying blank, and retries a failed build. Right-click the node → **Copy Value Presets diagnostics** copies a report for bug reports (what happened to the node, and errors other packs logged while the workflow loaded).
-
-### 0.2.6 (2026-09-25)
-
-- New node **Compatibility Check**: It allows workflow creators to configure the minimum ComfyUI version required, and also what custom node packs are required for the workflow to work. Then when a user opens the workflow, they can see from the node if they are missing any node packs or if they are on a too old version of anything. Created to reduce support load from my [timeline workflow](https://github.com/chanon/comfyui-obvpm-timeline). Also has a "copy report" button that lists the complete installation details for bug reports.
+Full change history in [CHANGELOG.md](CHANGELOG.md)
 
 ## YouTube Intro Videos
 
