@@ -8,6 +8,7 @@ ComfyUI nodes to save time and keep your workflows tidy. Bundle multiple wires i
 
 ### Latest HEAD
 
+- New: **Mute Group If** mutes the group it sits in while its `mute` value is true (or false, with `invert`): every node in the frame is set to Never, so it is left out of the run -- nothing in it starts, loaders included -- and shows greyed, and it comes back when the value turns. The value is read before the run, as the switches read theirs (a widget, a Value Presets field, a primitive, the timeline's upscale toggle); one it cannot tell leaves the group on. Only nodes it muted are unmuted again, and a node covered by several stays muted while any of them wants it. Value Presets fades follow it at once: a preset read only by muted nodes fades too. See [Mute Group If](#mute-group-if).
 - Value Presets: a preset read only by a node that never runs -- one with no outputs that is not an output node, such as a display-only preview -- now fades like an unused one; before, wiring such a display node kept it lit.
 - Value Presets: **headings** — a `## Title` line in the schema puts a heading over the fields below it, so long settings read in groups (in the config dialog it is the new **group** column). A heading hides while every field under it does.
 - Value Presets: **fields switched off per node** — the config dialog's new **on** column. Nodes sharing one schema (and one set of presets) need not all use every field: a field switched off is hidden on that node and `None` on its bundle, and the fields it decides still see it at its default (a field shown `when` the switched-off one has its default value keeps showing). Override Bundle Values downstream keeps it off.
@@ -106,6 +107,7 @@ Every node in this pack is listed with **(obvpm)** after its name, so searching 
 | [Optional Image / Video / Audio / Latent / Any](#optional-image--optional-video--optional-audio--optional-latent--optional-any) | Pass a value through; mute or bypass when it is missing |
 | [Required Model](#required-model)                                                                                               | Refuse to queue until a model is wired in               |
 | [Mute If](#mute-if)                                                                                                             | Block everything downstream on a boolean                |
+| [Mute Group If](#mute-group-if)                                                                                                 | Mute the group it sits in on a boolean known before the run |
 | [Lazy Switch](#lazy-switch)                                                                                                     | Boolean two-way switch; only the chosen side runs       |
 | [Lazy Switch 2 Values / 3 Values](#lazy-switch-2-values--3-values)                                                              | The same switch for two or three values together        |
 | [Lazy Case Switch](#lazy-case-switch)                                                                                           | Pick a branch by name from a list you write             |
@@ -413,6 +415,7 @@ ComfyUI offers three different ways to "not run" part of a workflow, and the nod
 | **Mute If** (ExecutionBlocker) | Every node downstream of the blocked output is silently skipped. Cannot be caught or handled downstream.                                          | Kill an entire path when its input is missing.                         |
 | **Bypass** (forward `None`)    | Downstream nodes with an *optional* input see it as unconnected and handle the absence themselves. Feeding `None` into a *required* input errors. | Let a tolerant downstream node decide what to do.                      |
 | **Lazy** (lazy inputs)         | The unselected branch is never executed at all — its upstream nodes don't run and cost nothing.                                                   | Conditionally skip expensive work (sampling, upscaling, whole groups). |
+| **Mute Group If** (mode Never) | Every node in a group is left out of the prompt before the run: nothing in it runs, upstream or down, and it shows greyed.                         | Switch a whole part of a workflow off by a setting known before the run. |
 
 Mute If and bypass act *downstream* of the gate; only lazy evaluation saves the *upstream* work feeding the unselected side.
 
@@ -440,6 +443,17 @@ The minimal gate: passes a MODEL through. The input is required, so queueing wit
 ![Mute node](assets/mute.webp)
 
 Passes any input through unchanged; when the `mute` boolean is true, blocks everything downstream. The boolean is connectable, so it can be driven by logic (e.g. a gate's `present` through a Boolean invert). Note: nodes *upstream* of the input still run — use a Lazy Switch when you want the upstream work skipped too.
+
+#### Mute Group If
+
+Mutes **the group it sits in** while `mute` is true (or while it is false, with `invert` on): every node in the frame is set to *Never*, so ComfyUI leaves it out of the run altogether -- loaders, samplers, save nodes, everything -- and draws it greyed. When the value turns, the group comes back.
+
+- **Which group:** the smallest group frame holding the node's centre; its nodes are those whose centre is inside that frame (the frontend's own rule for what a group moves). Drag the node to another group and the muting follows it; outside every group it mutes nothing. The node itself is never muted.
+- **The value has to be known before the run**, because muting happens while the prompt is built: a widget, a primitive, a Value Presets field (through Unbundle or Get/Set), a Not of one, or a node that says so, like the timeline's upscale toggle. The nodes feeding it (a Get, a Not) are never muted, so they can sit beside it inside the group. When the value cannot be told, the group is left **on** -- the safe side wherever a switch or gate still decides at run time. The node's face says what it is doing.
+- **Only what it muted comes back:** a node you muted or bypassed yourself keeps its mode. Several Mute Group If nodes can cover the same nodes (nested groups); a node stays muted while any of them wants it.
+- It applies whenever the value changes, and once more right before every queue. The node itself never runs (no outputs).
+
+A node in a muted group that something *outside* the group still needs leaves that consumer without its input, so keep shared work outside such groups.
 
 ### Switches (obvpm/switches)
 

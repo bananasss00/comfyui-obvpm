@@ -148,3 +148,42 @@ class MuteGate:
         if mute:
             return (ExecutionBlocker(None),)
         return (input,)
+
+
+class MuteGroupIf:
+    """Mutes the group it sits in while `mute` is true (false with
+    `invert`). All of it happens in the browser, before the prompt is
+    built (web/mute_group_if.js): a muted node is left out of the prompt,
+    so nothing in the group runs. The node itself never runs either -- it
+    has no outputs -- so its value has to be known before the run."""
+    CATEGORY = "obvpm/gates"
+    FUNCTION = "noop"
+    RETURN_TYPES = ()
+    DESCRIPTION = (
+        "Mutes the group this node sits in while `mute` is true (or false, "
+        "with invert): every node in the frame is set to Never and left "
+        "out of the run, and comes back when the value changes. Only nodes "
+        "it muted are unmuted again. Wire `mute` from a value known before "
+        "the run (a widget, Value Presets field, primitive, or a timeline "
+        "mode); the nodes feeding it are never muted, so a Get may sit "
+        "beside it in the group. When it cannot tell, the group is left on."
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "mute": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Mute this node's group while true. Wire it "
+                               "from a value known before the run.",
+                }),
+                "invert": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Mute while `mute` is false instead.",
+                }),
+            },
+        }
+
+    def noop(self, **_):
+        return ()

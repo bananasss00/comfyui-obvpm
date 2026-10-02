@@ -47,6 +47,7 @@ from .gates import (
     LatentOptionalGate,
     ModelOptionalGate,
     MuteGate,
+    MuteGroupIf,
     VideoOptionalGate,
 )
 from .image import DownscaleImageToMegapixels
@@ -74,6 +75,7 @@ NODE_CLASS_MAPPINGS = {
     "LatentOptionalGate (obvpm)": LatentOptionalGate,
     "AnyOptionalGate (obvpm)": AnyOptionalGate,
     "MuteGate (obvpm)": MuteGate,
+    "MuteGroupIf (obvpm)": MuteGroupIf,
     "LazySwitch (obvpm)": LazySwitch,
     "LazySwitch2 (obvpm)": LazySwitch2,
     "LazySwitch3 (obvpm)": LazySwitch3,
@@ -105,6 +107,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LatentOptionalGate (obvpm)": "Optional Latent",
     "AnyOptionalGate (obvpm)": "Optional Any",
     "MuteGate (obvpm)": "Mute If",
+    "MuteGroupIf (obvpm)": "Mute Group If",
     "LazySwitch (obvpm)": "Lazy Switch",
     "LazySwitch2 (obvpm)": "Lazy Switch 2 Values",
     "LazySwitch3 (obvpm)": "Lazy Switch 3 Values",

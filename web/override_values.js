@@ -754,7 +754,9 @@ function pathsFrom(presetsNode, { prune = false, blocked = null } = {}) {
         }
         const node = graph.getNodeById?.(id);
         if (!node) return;
-        if (node.mode === 2) return;                    // muted: nothing reads on
+        // muted: it will not run, so nothing reads on -- and that is
+        // evidence, as a blocked node is (Mute Group If mutes whole groups)
+        if (node.mode === 2) return void dead.push(acc);
         if (node.type === NODE) {
             if (node.mode === 4) return fromOutput(node, 0, acc, depth);  // bypassed
             if (prune && blocked?.has(node)) return void dead.push(acc);
@@ -809,7 +811,8 @@ function pathsFrom(presetsNode, { prune = false, blocked = null } = {}) {
 //   the run: the timeline's upscale toggle choosing between generation
 //   and upscale engine settings), or
 // - at a node a Mute If gate will block (its `mute` known before the run:
-//   the upscale group's gate while generating).
+//   the upscale group's gate while generating), or
+// - at a muted node (a group Mute Group If has muted).
 // Only with that evidence: a new node, an unwired one, or one behind a
 // switch or gate decided at run time, is drawn as usual. Nothing is
 // saved; the node still edits.
@@ -1116,6 +1119,9 @@ api.addEventListener("graphChanged", scheduleMarks);
 // pointerup has changed the value by the time it runs.
 window.addEventListener("pointerup", scheduleMarks, true);
 window.addEventListener("keyup", scheduleMarks, true);
+// Mute Group If changes modes on its own clock (a beat after the click
+// that changed its value), which none of the above sees
+window.addEventListener("obvpm:modes-changed", scheduleMarks);
 
 // ---------------------------------------------------------------------
 // the node
