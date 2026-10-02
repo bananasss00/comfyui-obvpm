@@ -102,12 +102,15 @@ class SchemaBundle(dict):
     Unbundle, Peek or other consumer ever sees it.
     """
 
-    __slots__ = ("obvpm_schema", "obvpm_values")
+    __slots__ = ("obvpm_schema", "obvpm_values", "obvpm_disabled")
 
-    def __init__(self, packed=(), schema="", values=None):
+    def __init__(self, packed=(), schema="", values=None, disabled=()):
         super().__init__(packed)
         self.obvpm_schema = str(schema or "")
         self.obvpm_values = dict(values or {})
+        # the fields the Value Presets node switched off, so a re-resolve
+        # downstream switches them off too
+        self.obvpm_disabled = frozenset(disabled or ())
 
 
 def _as_bundle(bundle, node):

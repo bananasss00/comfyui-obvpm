@@ -34,14 +34,14 @@ const FIELDS = [
       default_text: "20", choices: null, default: 20, hint: "", when: null, when_text: "" },
 ];
 
-async function harness() {
+async function harness(fields = FIELDS) {
     const extensions = [];
     const app = { registerExtension: (ext) => extensions.push(ext), canvas: {} };
     const asked = { schema: 0 };
     const api = { fetchApi: async (url) => {
         if (url === "/obvpm/presets/schema") {
             asked.schema += 1;
-            return { json: async () => ({ fields: FIELDS }) };
+            return { json: async () => ({ fields }) };
         }
         throw new Error("Offline test: " + url);
     } };
@@ -65,6 +65,7 @@ async function harness() {
         else if (name === "obvpm_ui.js") {
             mod = mock({ themePalette: () => ({}), el: noop,
                 valueTooltip: (w, width, base) => base,
+                legacyCanvasBox: (ctx, w, h) => [w, h],
                 ...Object.fromEntries(["TEXT", "TITLE", "INK", "DIM", "EDGE", "FILL", "PANEL",
                     "textBox", "pushButton", "openOverlay", "dropWidgetSockets",
                     "askText", "askConfirm", "askChoice", "askTextChoice", "notice", "NODE_BUTTON", "NODE_BUTTON_HOVER",
@@ -106,6 +107,10 @@ class Node {
         // frontend 1.53: a widget added under a name the node already
         // has is renamed "name#1" on registration (ensureUniqueWidgetNames)
         if (this.widgets.some((o) => o !== w && o.name === name)) w.name = name + "#1";
+        return w;
+    }
+    addCustomWidget(w) {
+        this.widgets.push(w);
         return w;
     }
     addDOMWidget(name, type, element, options) {
@@ -336,4 +341,69 @@ test("a node its graph does not hold is recorded with why, and not re-asked per 
     for (let frame = 0; frame < 5; frame++) await p.rebuild(node);
     assert.equal(asked.schema, before, "no request per frame");
     assert.equal(field(node, "steps"), undefined, "no fields built on it");
+});
+
+// Headings (`## Title` lines) and fields switched off on one node. The
+// server describes each field with its `group`; the node keeps the names it
+// switches off in its `disabled` widget.
+const ENGINE = [
+    { name: "steps", kind: "int", ref: null, lo: null, hi: null, span: "", decimals: 0,
+      default_text: "8", choices: null, default: 8, hint: "", when: null, when_text: "",
+      group: null },
+    { name: "dual_stage", kind: "bool", ref: null, lo: null, hi: null, span: "", decimals: null,
+      default_text: "false", choices: null, default: false, hint: "", when: null, when_text: "",
+      group: "Schedule" },
+    { name: "schedule", kind: "choice", ref: null, lo: null, hi: null, span: "", decimals: null,
+      default_text: "full", choices: ["full", "first_x_steps"], default: "full", hint: "",
+      when: { field: "dual_stage", not: false, values: ["false"] },
+      when_text: "dual_stage = false", group: "Schedule" },
+    { name: "first_stage_scale", kind: "float", ref: null, lo: 0.25, hi: 1, span: "0.25..1.00",
+      decimals: 2, default_text: "0.5", choices: null, default: 0.5, hint: "",
+      when: { field: "dual_stage", not: false, values: ["true"] },
+      when_text: "dual_stage = true", group: "First stage" },
+];
+
+function engineNode(values, disabled) {
+    const node = new Node(values);
+    node.widgets.push({ name: "set", value: "" }, { name: "disabled", value: disabled ?? "" });
+    return node;
+}
+
+test("a heading sits over its group and hides when all of it does", async () => {
+    const { p } = await harness(ENGINE);
+    const node = engineNode({ dual_stage: false });
+    await p.rebuild(node, true);
+    await tick();
+    const names = node.widgets.map((w) => w.name);
+    assert.ok(names.indexOf("§ Schedule") < names.indexOf("dual_stage"));
+    assert.ok(names.indexOf("§ First stage") < names.indexOf("first_stage_scale"));
+    assert.equal(field(node, "§ Schedule").serialize, false);
+    // dual_stage off: nothing of "First stage" is shown, so neither is its heading
+    assert.equal(!!field(node, "§ Schedule").hidden, false);
+    assert.equal(field(node, "§ First stage").hidden, true);
+    field(node, "dual_stage").callback(true);
+    assert.equal(!!field(node, "§ First stage").hidden, false);
+});
+
+test("a field switched off on this node is hidden but decides at its default", async () => {
+    const { p } = await harness(ENGINE);
+    // stored true, switched off here: `schedule` (when dual_stage = false)
+    // still shows, the first stage stays hidden
+    const node = engineNode({ dual_stage: true }, "dual_stage");
+    await p.rebuild(node, true);
+    await tick();
+    assert.equal(field(node, "dual_stage").hidden, true);
+    assert.equal(!!field(node, "schedule").hidden, false);
+    assert.equal(field(node, "first_stage_scale").hidden, true);
+    assert.equal(field(node, "§ First stage").hidden, true);
+});
+
+test("the editor writes a heading line wherever the group changes", async () => {
+    const { p } = await harness(ENGINE);
+    const text = p.schemaOf(ENGINE.map(p.rowOf));
+    const heads = (t) => t.trim().split(/\r?\n/).map((l) => l.split(":")[0]);
+    assert.deepEqual(heads(text), [
+        "steps", "## Schedule", "dual_stage", "schedule", "## First stage", "first_stage_scale"]);
+    const ended = p.schemaOf([{ ...p.rowOf(ENGINE[1]) }, { ...p.rowOf(ENGINE[0]) }]);
+    assert.deepEqual(heads(ended), ["## Schedule", "dual_stage", "##", "steps"]);
 });

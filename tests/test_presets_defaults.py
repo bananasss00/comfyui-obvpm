@@ -82,9 +82,11 @@ class SetName(unittest.TestCase):
         (b,) = node.pack("steps: int = 20", "custom", "{}", "{}", "steps", set="engine")
         self.assertEqual(dict(a), dict(b))
 
-    def test_set_is_declared_last(self):
+    def test_set_is_declared_after_the_older_inputs(self):
+        # widgets_values is positional: inputs only ever join at the end
+        # (`disabled`, after `set`, came later still)
         optional = list(presets.ValuePresets.INPUT_TYPES()["optional"])
-        self.assertEqual(optional[-1], "set")
+        self.assertEqual(optional, ["values", "presets", "names", "set", "disabled"])
 
 
 if __name__ == "__main__":

@@ -6,6 +6,12 @@ ComfyUI nodes to save time and keep your workflows tidy. Bundle multiple wires i
 
 **Also check out my new Timeline node:**  https://github.com/chanon/comfyui-obvpm-timeline It not only lets you extend videos seamlessly, but also **prepend, bridge and even create seamless loops with motion context**!
 
+### Latest HEAD
+
+- Value Presets: a preset read only by a node that never runs -- one with no outputs that is not an output node, such as a display-only preview -- now fades like an unused one; before, wiring such a display node kept it lit.
+- Value Presets: **headings** — a `## Title` line in the schema puts a heading over the fields below it, so long settings read in groups (in the config dialog it is the new **group** column). A heading hides while every field under it does.
+- Value Presets: **fields switched off per node** — the config dialog's new **on** column. Nodes sharing one schema (and one set of presets) need not all use every field: a field switched off is hidden on that node and `None` on its bundle, and the fields it decides still see it at its default (a field shown `when` the switched-off one has its default value keeps showing). Override Bundle Values downstream keeps it off.
+
 ### 0.2.10-preview.2 (2026-09-28)
 
 - Value Presets: works with the timeline's **load settings** ([comfyui-obvpm-timeline](https://github.com/chanon/comfyui-obvpm-timeline)): each changed value is its own row; a changed schema, and each workflow preset that differs, is one row, unticked by default, with what changed inside it behind a collapsed toggle.
@@ -245,6 +251,9 @@ steps: int 1..200 = 20
 - **Types** are `text`, `int`, `float`, `bool`, `choice a, b, c`, and `@Node.input` to borrow another node's dropdown, which then tracks that list instead of a copy of it. A float range sets the decimals shown (`0..1.0` one, `0..1.00` two).
 - **`when field = value`** (or `!=`, and `a, b` for any of several) shows the field only while a `choice` or `bool` field **declared above it** holds one of those values. While hidden, the field's value **on the bundle is `None`** — whatever is stored — so nothing downstream acts on a setting the node is not showing. The stored value is kept and returns with the field. A field whose deciding field is itself hidden is hidden too.
 - **`# tooltip`** at the end of the line is shown when hovering over the field. (A `#` at the *start* of a line is a comment.)
+- **`## Title`** on a line of its own puts a heading over the fields below it, until the next heading (a bare `##` ends a group). Display only: the bundle and the stored values do not change.
+
+**Fields switched off on one node.** Nodes can share a schema and presets (one Preset Type Id) without all using every field: on the config **Schema** page, untick a field's **on** box and it is hidden on *this* node and `None` on its bundle; the schema itself stays the same. Fields that depend on it (`when`) still see it at its default.
 
 <img src="assets/value-presets-modified.webp" title="" alt="A modified Value Presets selection with its changed field marked" width="539">
 

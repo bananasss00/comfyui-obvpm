@@ -87,11 +87,13 @@ def apply_overrides(bundle, state, wires="", wired=None):
     if schema:
         merged = dict(getattr(bundle, "obvpm_values", {}) or {})
         merged.update(chosen)
+        off = getattr(bundle, "obvpm_disabled", frozenset())
         try:
-            packed, _fields = _presets.resolve(schema, json.dumps(merged))
+            packed, _fields = _presets.resolve(schema, json.dumps(merged),
+                                               disabled=off)
         except ValueError as why:
             raise ValueError("%s: %s" % (NODE, why)) from None
-        out = SchemaBundle(packed, schema, merged)
+        out = SchemaBundle(packed, schema, merged, off)
         missing = sorted(n for n in chosen if n not in packed)
         if missing:
             _LOG.warning("%s: the preset has no field %s; not overridden",

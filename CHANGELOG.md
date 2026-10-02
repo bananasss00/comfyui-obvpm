@@ -2,6 +2,12 @@
 
 Changes not yet in a release are listed under **Latest HEAD**; they become a numbered version when the pack is released.
 
+## Latest HEAD
+
+- Value Presets: a preset read only by a node that never runs -- one with no outputs that is not an output node, such as a display-only preview -- now fades like an unused one; before, wiring such a display node kept it lit.
+- Value Presets: **headings** — a `## Title` line in the schema puts a heading over the fields below it, so long settings read in groups (in the config dialog it is the new **group** column). A heading hides while every field under it does.
+- Value Presets: **fields switched off per node** — the config dialog's new **on** column. Nodes sharing one schema (and one set of presets) need not all use every field: a field switched off is hidden on that node and `None` on its bundle, and the fields it decides still see it at its default (a field shown `when` the switched-off one has its default value keeps showing). Override Bundle Values downstream keeps it off.
+
 ## 0.2.10-preview.2 (2026-09-28)
 
 - Value Presets: works with the timeline's **load settings** ([comfyui-obvpm-timeline](https://github.com/chanon/comfyui-obvpm-timeline)): each changed value is its own row; a changed schema, and each workflow preset that differs, is one row, unticked by default, with what changed inside it behind a collapsed toggle.

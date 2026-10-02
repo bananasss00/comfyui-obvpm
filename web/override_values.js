@@ -643,6 +643,14 @@ function linkIds(slot) {
     return Array.isArray(links) ? links : Object.values(links);
 }
 
+/** A node ComfyUI never executes: no outputs at all, and not an output
+ *  node (core runs only output nodes and what they need). */
+function neverRuns(node) {
+    if ((node.outputs ?? []).length) return false;
+    const def = node.constructor?.nodeData;
+    return !!def && !def.output_node;
+}
+
 function wrapperOf(sub) {
     const found = [];
     for (const g of allGraphs()) {
@@ -724,7 +732,14 @@ function pathsFrom(presetsNode, { prune = false, blocked = null } = {}) {
             onward = true;
             toGetters(node, acc, depth);
         }
-        if (!onward) ends.push(acc);            // the end of a chain: used
+        if (!onward) {
+            // the end of a chain: used -- unless the node never runs. A
+            // node with no outputs that is not an output node is never
+            // executed (nothing asks for it), so a display-only reader
+            // is no use of the preset
+            if (neverRuns(node)) dead.push(acc);
+            else ends.push(acc);
+        }
     };
     const visit = (graph, id, slot, acc, depth) => {
         if (depth > 64) return;

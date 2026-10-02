@@ -73,6 +73,7 @@ _MISSING = object()
 
 DEFAULT_SCHEMA = """# one field per line:  name: type [range] [= default] [when field = value] [# tooltip]
 # types: text | int | float | bool | choice a, b, c | @Node.input
+# a line `## Title` puts a heading over the fields below it
 steps: int 1..200 = 20
 cfg: float 0..100 = 5.0
 sampler: @SamplerName (obvpm).sampler_name
@@ -143,6 +144,9 @@ class Field:
         self.when = when
         # `# ...` after the type: what the widget says on hover
         self.hint = hint
+        # the `## Title` line above it, if any: a heading on the node,
+        # nothing else -- the bundle and the store never see it
+        self.group = None
 
     # ---------------------------------------------------------- choices
 
@@ -401,8 +405,15 @@ def parse_schema(text):
             "Value Presets: the schema is larger than %d KB."
             % (MAX_SCHEMA_BYTES // 1024))
     fields, seen = [], set()
+    group = None
     for number, line in enumerate(raw.splitlines(), start=1):
         line = line.strip()
+        if line.startswith("##"):
+            # `## Title` heads the fields below it; a bare `##` ends the
+            # group. A one-# line is still a comment, so a schema with
+            # headings loads on an older node, just without them.
+            group = line.lstrip("#").strip() or None
+            continue
         if not line or line.startswith("#"):
             continue
         if len(fields) >= MAX_FIELDS:
@@ -422,8 +433,15 @@ def parse_schema(text):
         if when_text is not None:
             field.when = _parse_when(number, line, name, when_text, fields)
         field.hint = hint
+        field.group = group
         fields.append(field)
     return fields
+
+
+def parse_disabled(text):
+    """The node's `disabled` widget -> the field names it switches off."""
+    return {name.strip() for name in re.split(r"[\n,]", str(text or ""))
+            if name.strip()}
 
 
 # a line's optional tails: ` when field = a, b` and ` # a hint`, in
@@ -596,8 +614,15 @@ def load_store(text, what):
     return loaded
 
 
-def resolve(schema, values, presets=None, preset=CUSTOM):
+def resolve(schema, values, presets=None, preset=CUSTOM, disabled=None):
     """The bundle this node emits, and the fields it was built from.
+
+    `disabled`: field names this NODE switches off (its `disabled` widget,
+    set in config -> Schema), for a schema shared by nodes that cannot all
+    use every field. A disabled field is hidden and None on the bundle like
+    one a `when` hides -- but the fields it decides see it at its default,
+    so switching off `dual_stage` does not also hide `schedule ... when
+    dual_stage = false`.
 
     `values` is the one source of truth for what runs; `preset` is the
     label the UI put on it. They are checked against each other so a
@@ -618,22 +643,37 @@ def resolve(schema, values, presets=None, preset=CUSTOM):
     # told. Saying so while the JSON is still there is the only moment
     # that helps.
     library = load_store(presets, "presets") if presets is not None else {}
+    off = set(disabled or ())
     packed = {}
     shown = {}
+    # what the `when` lines read: the bundle's values, except that a
+    # disabled field counts as shown at its default
+    decide, decide_shown = {}, {}
     for field in fields:
+        if field.name in off:
+            decide_shown[field.name] = is_shown(field, decide_shown, decide)
+            try:
+                decide[field.name] = field.default()
+            except ValueError:
+                decide[field.name] = None
+            shown[field.name] = False
+            packed[field.name] = None
+            continue
         # A field whose condition does not hold is None on the bundle,
         # WHATEVER IS STORED -- the store keeps the value so it comes
         # back when the condition holds again, but a hidden turbo LoRA
         # must not be applied because a name was still sitting in the
         # JSON. Not coerced either: a file that has since been deleted
         # is no reason to refuse a run that was not going to use it.
-        shown[field.name] = is_shown(field, shown, packed)
+        shown[field.name] = decide_shown[field.name] = is_shown(
+            field, decide_shown, decide)
         if not shown[field.name]:
-            packed[field.name] = None
+            packed[field.name] = decide[field.name] = None
             continue
         held = stored.get(field.name, _MISSING)
         packed[field.name] = (field.default() if held is _MISSING
                               else field.coerce(held))
+        decide[field.name] = packed[field.name]
     extra = [name for name in stored if name not in packed]
     if extra:
         # not an error: a value left over from a deleted field is exactly
@@ -727,7 +767,8 @@ def describe(schema):
                  "when": None if field.when is None else {
                      "field": field.when.field, "not": field.when.negate,
                      "values": list(field.when.values)},
-                 "when_text": "" if field.when is None else field.when.text}
+                 "when_text": "" if field.when is None else field.when.text,
+                 "group": field.group}
         try:
             if field.ref is not None:
                 field._choices = ref_choices(field.ref, field.name, descriptors)
@@ -939,14 +980,21 @@ class ValuePresets:
                                "Unbundle with 'get', or a KJNodes Get). "
                                "Turned on in config -> Set.",
                 }),
+                # LAST, after `set`, for the same reason: the fields this
+                # node switches off (config -> Schema, the `on` column),
+                # one per line. Owned by the UI, hidden there.
+                "disabled": ("STRING", {"default": "", "multiline": True}),
             },
         }
 
-    def pack(self, schema, preset, values="{}", presets="{}", names="", set=""):
+    def pack(self, schema, preset, values="{}", presets="{}", names="", set="",
+             disabled=""):
         # `set` is a name for the browser to join nodes by; nothing to do
         # with it here
-        packed, _fields = resolve(schema, values, presets, preset)
+        off = parse_disabled(disabled)
+        packed, _fields = resolve(schema, values, presets, preset, off)
         # the schema and the stored values travel with the bundle, so an
         # Override Bundle Values downstream can check and re-resolve its
         # overrides as this node would (bundle.SchemaBundle)
-        return (SchemaBundle(packed, schema, load_store(values, "values")),)
+        return (SchemaBundle(packed, schema, load_store(values, "values"),
+                             off),)

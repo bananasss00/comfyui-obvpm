@@ -6,7 +6,7 @@ import { api } from "../../scripts/api.js";
 // palette (the bundle config and Load Images & Compose use them too).
 import { el, TEXT, TITLE, INK, DIM, EDGE, FILL, PANEL,
          textBox, pushButton, openOverlay, askText, askConfirm, askChoice, askTextChoice, notice,
-         dropWidgetSockets, themePalette, valueTooltip,
+         dropWidgetSockets, themePalette, valueTooltip, legacyCanvasBox,
          NODE_BUTTON, NODE_BUTTON_HOVER } from "./obvpm_ui.js";
 import { trace, listenForPageErrors, loadStarted, loadFinished,
          reportText, copyText } from "./value_presets_diag.js";
@@ -57,11 +57,14 @@ const PRESETS = "presets";
 const NAMES = "names";
 // the constant's name, when "set by name" is on (obvpm_constants.js)
 const SET_W = "set";
+// the fields this node switches off (config -> Schema, the `on` column),
+// one per line: hidden here and None on the bundle (presets.py resolve)
+const DISABLED_W = "disabled";
 // Hidden on the node's face. The schema joins them: "edit schema…" is
 // the way in, and a multiline box of syntax sitting above the controls
 // is a second, worse one. It stays a real widget -- it is still the
 // store, still what a workflow carries, and still wire-able.
-const OWNED = [SCHEMA, VALUES, PRESETS, NAMES];
+const OWNED = [SCHEMA, VALUES, PRESETS, NAMES, DISABLED_W];
 
 // Where the built controls start, so buttons can sit after them.
 const MARK = "__obvpmField";
@@ -408,16 +411,29 @@ function isShown(field, fieldMap, values, shown) {
  */
 function applyVisibility(node) {
     const fieldMap = node.__obvpmFieldMap ?? {};
+    const off = disabledFields(node);
+    // what the `when` lines read: the values, except that a field this
+    // node switches off counts at its default (presets.py resolve)
     const values = readJson(node, VALUES);
+    for (const name of off) {
+        if (fieldMap[name]) values[name] = fieldMap[name].default;
+    }
     const shown = Object.create(null);
     for (const field of Object.values(fieldMap)) {
         shown[field.name] = isShown(field, fieldMap, values, shown);
+    }
+    for (const name of off) shown[name] = false;
+    // a heading shows while any field under it does
+    const groupShown = Object.create(null);
+    for (const field of Object.values(fieldMap)) {
+        if (field.group && shown[field.name]) groupShown[field.group] = true;
     }
     let moved = false;
     for (const w of node.widgets ?? []) {
         if (!w[MARK] || w.name === ROW_NAME) continue;
         const field = w.name.replace(/ {2}⚠$/, "");
-        const hidden = shown[field] === false;
+        const hidden = w[HEADING] != null ? !groupShown[w[HEADING]]
+            : shown[field] === false;
         // either flag: the options object can outlive a rebuild with
         // the widget's state while the instance comes back fresh
         if (!!(w.hidden || w.options?.hidden) !== hidden) {
@@ -430,6 +446,52 @@ function applyVisibility(node) {
         notifyVue(node);
     }
     return shown;
+}
+
+/** The field names this node switches off. */
+function disabledFields(node) {
+    return new Set(String(widget(node, DISABLED_W)?.value ?? "")
+        .split(/[\n,]/).map((n) => n.trim()).filter(Boolean));
+}
+
+// A heading over a group of fields (a `## Title` line in the schema):
+// drawn on the canvas like the fields themselves, so it sits in their
+// list in both renderers and takes no DOM overlay. Never serialized.
+const HEADING = "__obvpmHeading";
+const HEADING_H = 22;
+
+function headingWidget(node, title) {
+    const w = node.addCustomWidget({
+        name: "§ " + title,
+        type: "obvpm_heading",
+        value: "",
+        options: { serialize: false },
+        serialize: false,
+        computeSize: (width) => [width, HEADING_H],
+        draw(ctx, _node, width, y, height) {
+            const [wide] = legacyCanvasBox(ctx, width, height || HEADING_H);
+            const P = themePalette();
+            const h = height || HEADING_H;
+            ctx.save();
+            ctx.font = "600 11px sans-serif";
+            ctx.fillStyle = P.sub;
+            ctx.textBaseline = "middle";
+            const mid = y + h / 2 + 2;
+            const text = String(title).toUpperCase();
+            ctx.fillText(text, 15, mid);
+            const after = 15 + ctx.measureText(text).width + 8;
+            ctx.strokeStyle = P.sub;
+            ctx.globalAlpha *= 0.35;
+            ctx.beginPath();
+            ctx.moveTo(after, mid);
+            ctx.lineTo(wide - 15, mid);
+            ctx.stroke();
+            ctx.restore();
+        },
+    });
+    w[MARK] = true;
+    w[HEADING] = title;
+    return w;
 }
 
 /**
@@ -486,7 +548,8 @@ function modifiedFields(node) {
     // for a field the schema lost is nothing to report either way.
     const fields = node.__obvpmFieldMap
         ? Object.keys(node.__obvpmFieldMap) : Object.keys(now);
-    return fields.filter((key) => key in now
+    const off = disabledFields(node);
+    return fields.filter((key) => key in now && !off.has(key)
         && String(now[key]) !== String(presetValue(node, saved, key)));
 }
 
@@ -993,7 +1056,12 @@ function buildFields(node, answer) {
         applyVisibility(node);
     };
 
+    let group = null;
     for (const field of fields) {
+        if ((field.group ?? null) !== group) {
+            group = field.group ?? null;
+            if (group) headingWidget(node, group);
+        }
         const held = Object.prototype.hasOwnProperty.call(stored, field.name)
             ? stored[field.name] : field.default;
         fieldWidget(node, field, held, onChange);
@@ -1431,6 +1499,8 @@ function rowOf(field) {
         def: field.default_text ?? "",
         when: field.when_text ?? "",
         hint: field.hint ?? "",
+        group: field.group ?? "",
+        on: true,
     };
 }
 
@@ -1452,9 +1522,20 @@ function lineOf(row) {
         + (when ? " when " + when : "") + (hint ? " # " + hint : "");
 }
 
-/** The schema text the editor's rows stand for. */
+/** The schema text the editor's rows stand for: a `## Title` line
+ *  wherever the group changes (a bare `##` where a group ends). */
 function schemaOf(rows) {
-    return rows.map(lineOf).join("\n") + "\n";
+    const lines = [];
+    let group = "";
+    for (const row of rows) {
+        const next = String(row.group ?? "").trim();
+        if (next !== group) {
+            lines.push(next ? "## " + next : "##");
+            group = next;
+        }
+        lines.push(lineOf(row));
+    }
+    return lines.join("\n") + "\n";
 }
 
 function typeLabel(row) {
@@ -1828,7 +1909,8 @@ function setPane(node) {
 
 async function openConfig(node, tab = "presets") {
     const answer = await describe(widget(node, SCHEMA)?.value ?? "");
-    const rows = (answer.fields ?? []).map(rowOf);
+    const off = disabledFields(node);
+    const rows = (answer.fields ?? []).map((f) => ({ ...rowOf(f), on: !off.has(f.name) }));
 
     // wider than the kit's default: a row is name, type, range,
     // default, condition and hint, and wrapping them would lose the
@@ -1841,7 +1923,8 @@ async function openConfig(node, tab = "presets") {
         display: "flex", gap: "5px", color: DIM, font: "12px sans-serif",
         padding: "0 2px",
     });
-    for (const [label, width] of [["", "58px"], ["name", "150px"],
+    for (const [label, width] of [["", "58px"], ["on", "22px"], ["group", "100px"],
+                                  ["name", "150px"],
                                   ["type", "200px"], ["range / choices", "160px"],
                                   ["default", "110px"], ["shown when", "160px"],
                                   ["tooltip", "160px"]]) {
@@ -1877,9 +1960,24 @@ async function openConfig(node, tab = "presets") {
             rows.splice(to, 0, rows.splice(index, 1)[0]);
             draw();
         };
+        // `on`: whether THIS node uses the field. The schema stays the
+        // same for every node sharing it; a field switched off here is
+        // hidden here and None on this node's bundle.
+        const on = el("input", { flex: "0 0 22px", margin: "0" });
+        on.type = "checkbox";
+        on.checked = row.on !== false;
+        on.title = "Use this field on this node. Off: hidden here and None on "
+            + "this node's bundle; the schema (and every other node using it) "
+            + "is unchanged.";
+        on.addEventListener("change", () => { row.on = on.checked; });
+        const group = textBox(row.group, "group", (v) => { row.group = v; }, "100px");
+        group.title = "A heading on the node over this field and the ones "
+            + "after it with the same group (a `## group` line in the schema).";
         line.append(
             pushButton("▲", () => move(-1), { padding: "1px 5px" }),
             pushButton("▼", () => move(1), { padding: "1px 5px" }),
+            on,
+            group,
             textBox(row.name, "name", (v) => { row.name = v; }, "150px"),
             pushButton(typeLabel(row), () => openTypePicker(row, draw),
                        { flex: "0 0 200px", overflow: "hidden",
@@ -2128,7 +2226,8 @@ async function openConfig(node, tab = "presets") {
         // fresh identities: nothing here is a rename of a row that was
         // open, so no stored value is carried onto a retyped name
         rows.splice(0, rows.length,
-                    ...(check.fields ?? []).map((f) => ({ ...rowOf(f), was: "" })));
+                    ...(check.fields ?? []).map((f) => ({ ...rowOf(f), was: "",
+                                                          on: !off.has(f.name) })));
         draw();
         say((check.fields ?? []).length + " field(s) -- Apply to keep them.");
         return true;
@@ -2164,7 +2263,8 @@ async function openConfig(node, tab = "presets") {
         const legend = el("div", { color: DIM, font: "12px sans-serif" },
             "One field per line: name: type [range or choices] [= default] "
             + "[when field = value] [# tooltip]. Types: text, int, float, bool, "
-            + "choice a, b, c, @Node.input. Lines starting with # are comments.");
+            + "choice a, b, c, @Node.input. A line `## Title` puts a heading over "
+            + "the fields below it; other lines starting with # are comments.");
         const buttons = el("div", { display: "flex", gap: "6px",
                                     justifyContent: "flex-end" });
         buttons.append(
@@ -2191,7 +2291,8 @@ async function openConfig(node, tab = "presets") {
     schemaTools.append(
         pushButton("+ add field", () => {
             rows.push({ name: "", kind: "text", ref: "", arg: "", def: "",
-                        when: "", hint: "" });
+                        when: "", hint: "", on: true,
+                        group: rows.length ? rows[rows.length - 1].group : "" });
             draw();
         }),
         textButton);
@@ -2265,6 +2366,11 @@ async function openConfig(node, tab = "presets") {
             // would come back at its default -- not reported as modified
             // either, because it is no longer a field anyone compares.
             carryRenames(node, renamesIn(rows));
+            const offW = widget(node, DISABLED_W);
+            if (offW) {
+                offW.value = rows.filter((r) => r.on === false)
+                    .map((r) => String(r.name ?? "").trim()).filter(Boolean).join("\n");
+            }
             const w = widget(node, SCHEMA);
             if (w) {
                 w.value = text;
