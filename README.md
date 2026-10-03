@@ -6,7 +6,7 @@ ComfyUI nodes to save time and keep your workflows tidy. Bundle multiple wires i
 
 **Also check out my new Timeline node:**  https://github.com/chanon/comfyui-obvpm-timeline It not only lets you extend videos seamlessly, but also **prepend, bridge and even create seamless loops with motion context**!
 
-### Latest HEAD
+### 0.2.12 (2026-10-04)
 
 - Value Presets: a node that reads a constant by name, with no Get node in between (a node offering `obvpmConstantRead()`), now counts as reading it. Before, a value whose only reader was such a node seemed to go nowhere, so the presets feeding it faded although they were used.
 
@@ -20,19 +20,6 @@ ComfyUI nodes to save time and keep your workflows tidy. Bundle multiple wires i
 ### 0.2.10-preview.2 (2026-09-28)
 
 - Value Presets: works with the timeline's **load settings** ([comfyui-obvpm-timeline](https://github.com/chanon/comfyui-obvpm-timeline)): each changed value is its own row; a changed schema, and each workflow preset that differs, is one row, unticked by default, with what changed inside it behind a collapsed toggle.
-
-### 0.2.10-preview.1 (2026-09-28)
-
-- Value Presets: the **schema** button is now **config**, with three pages: Presets, Schema (as before) and Set.
-- Value Presets: **user presets** — presets kept in your user folder under the node's **Preset Type Id**, shared by every workflow whose node has the same id, so your presets survive a new version of a workflow. The workflow's own presets can be hidden from the chooser. See [Value Presets](#value-presets).
-- Value Presets: nodes with the same Preset Type Id also **share their workflow presets** within a workflow.
-- Value Presets: **export / import** presets as a small JSON file, to move them between workflows or share them.
-- Value Presets: **set to constant**, like a Bundle's set — an Unbundle with get or a KJNodes Get reads the bundle by name, without a wire. Turned on in config; the name is the node's **set_constant** field.
-- Value Presets: a borrowed dropdown whose default is not on this install keeps its dropdown (starting on the first entry) instead of turning into a text field.
-- Value Presets: fields show **as the workflow opens**, not after it has finished loading — the node keeps the last description of its schema with the workflow (a few KB) and builds from it at once, while the server is still asked and wins if it answers differently. A borrowed dropdown's list, and anything taken from it, is never saved: it is read from the browser's own node definitions, so no model or LoRA file names travel in a shared workflow.
-- Value Presets: a node **not used by the next run** fades — when every path from it ends at a switch that will pick another branch, or at nodes a Mute If gate will block, and that is known before the run (a switch's or gate's own setting, a preset value, or the timeline's upscale toggle: while generating, the upscale engine settings and upscale options fade; while upscaling, the generation engine settings). A new or unwired node, or one behind a switch or gate decided at run time, looks as usual. Only the look changes; the node still edits.
-- New node: **Override Bundle Values** — override some of a bundle's values (typically a Value Presets node's) per run, with the preset's own ranges and choices, or by wiring in a value no widget can hold. The Value Presets node marks the fields that are overridden downstream. See [Override Bundle Values](#override-bundle-values).
-- Fixed: Load Images & Compose ignored an image list set from outside the node -- e.g. the timeline's "load settings" restoring a take -- and kept showing (and on the next edit wrote back) its old list. It now re-reads the list whenever it changes.
 
 Full change history in [CHANGELOG.md](CHANGELOG.md)
 

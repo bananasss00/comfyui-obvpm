@@ -2,7 +2,7 @@
 
 Changes not yet in a release are listed under **Latest HEAD**; they become a numbered version when the pack is released.
 
-## Latest HEAD
+## 0.2.12 (2026-10-04)
 
 - Value Presets: a node that reads a constant by name, with no Get node in between (a node offering `obvpmConstantRead()`), now counts as reading it. Before, a value whose only reader was such a node seemed to go nowhere, so the presets feeding it faded although they were used.
 
