@@ -643,6 +643,21 @@ function linkIds(slot) {
     return Array.isArray(links) ? links : Object.values(links);
 }
 
+/**
+ * A node that reads a constant by NAME, with no Get node: it says so with
+ * `obvpmConstantRead()` (the constant's name, or "" while it reads none),
+ * so a setter's value goes on to it as to a getter. The timeline pack's
+ * result previews (`result_constant`) do.
+ */
+function readsConstant(node, key) {
+    if (!key || typeof node?.obvpmConstantRead !== "function") return false;
+    try {
+        return String(node.obvpmConstantRead() ?? "") === key;
+    } catch (err) {
+        return false;
+    }
+}
+
 /** A node ComfyUI never executes: no outputs at all, and not an output
  *  node (core runs only output nodes and what they need). */
 function neverRuns(node) {
@@ -708,7 +723,7 @@ function pathsFrom(presetsNode, { prune = false, blocked = null } = {}) {
             for (const n of nodesOf(g)) {
                 if (n === setter || constantOf(n) !== key) continue;
                 if (n.type === "GetNode") fromOutput(n, 0, acc, depth + 1);
-                else if (isOurGetter(n)) {
+                else if (isOurGetter(n) || readsConstant(n, key)) {
                     if (prune) readOn(n, acc, depth + 1);
                     else ends.push(acc);
                 }
@@ -847,7 +862,8 @@ function blockedNodes() {
             for (const g of allGraphs()) {
                 for (const n of nodesOf(g)) {
                     if (n === node || !key || constantOf(n) !== key || out.has(n)) continue;
-                    if (n.type === "GetNode" || isOurGetter(n)) {
+                    if (n.type === "GetNode" || isOurGetter(n)
+                            || readsConstant(n, key)) {
                         out.add(n);
                         flowAll(n);
                     }
