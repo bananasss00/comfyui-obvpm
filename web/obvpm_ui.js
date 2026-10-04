@@ -523,6 +523,12 @@ export function pushButton(label, onClick, style) {
  * before the dialog itself. `dismiss(close)`, when given, is what
  * Escape and a click outside do instead of closing outright -- a dialog
  * with an edit in progress backs out of the edit first.
+ *
+ * ENTER = OK, for a dialog that names its OK: `panel.obvpmEnter = fn`
+ * (the Bundle / Unbundle settings do, through their footer). Not from
+ * where Enter means something of its own -- a text area (a new line), a
+ * button (presses itself), a dropdown, an IME composition -- nor while a
+ * pop is open over the dialog, nor with a modifier held.
  */
 const overlayStack = [];
 
@@ -553,7 +559,25 @@ export function openOverlay(width, onClose, { dismiss } = {}) {
         onClose?.();
     }
     const leave = () => (dismiss ? dismiss(close) : close());
+    function onEnter(ev) {
+        if (typeof panel.obvpmEnter !== "function" || ev.isComposing
+                || ev.repeat || ev.shiftKey || ev.ctrlKey || ev.altKey
+                || ev.metaKey) return;
+        const live = overlayStack.filter((o) => o.isConnected);
+        if (live[live.length - 1] !== overlay) return;
+        if (overlay.querySelector(":scope > [data-obvpm-pop]")) return;
+        const t = ev.target;
+        if (t instanceof Element && t.closest("textarea, button, select, "
+                + "[contenteditable]:not([contenteditable='false'])")) return;
+        ev.stopPropagation();
+        ev.preventDefault();
+        panel.obvpmEnter();
+    }
     function onKey(ev) {
+        if (ev.key === "Enter") {
+            onEnter(ev);
+            return;
+        }
         if (ev.key !== "Escape") return;
         // an overlay opened over this one answers its own Escape; this
         // one must not also act on the same press (see above)

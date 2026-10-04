@@ -236,19 +236,21 @@ function footerOf(panel, close, onOk) {
         display: "flex", gap: "8px", justifyContent: "flex-end",
         paddingTop: "4px",
     });
+    const ok = () => {
+        const problem = onOk();
+        if (problem) {
+            error.textContent = problem;
+            error.style.display = "block";
+        } else {
+            close();
+        }
+    };
     footer.append(
         pushButton("Cancel", close),
-        pushButton("OK", () => {
-            const problem = onOk();
-            if (problem) {
-                error.textContent = problem;
-                error.style.display = "block";
-            } else {
-                close();
-            }
-        }, { fontWeight: "600" }),
+        pushButton("OK", ok, { fontWeight: "600" }),
     );
     panel.append(error, footer);
+    panel.obvpmEnter = ok;          // Enter = OK (openOverlay)
 }
 
 // Whether the source has each field: a green dot yes, a red cross no

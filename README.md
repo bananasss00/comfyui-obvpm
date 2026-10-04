@@ -8,6 +8,7 @@ ComfyUI nodes to save time and keep your workflows tidy. Bundle multiple wires i
 
 ### Latest HEAD
 
+- Bundle and Unbundle settings: Enter is OK.
 - Mute Group If works inside a subgraph: it mutes the group around the subgraph's node.
 - Mute Group If no longer shows a status line ("running …" / "muting …") under its widgets, and a new one is no taller than its two widgets.
 - New, for other packs: a node of another pack can set a bundle constant itself (`obvpmConstantWidget`) and name its fields for Unbundle.
