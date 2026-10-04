@@ -6,6 +6,12 @@ ComfyUI nodes to save time and keep your workflows tidy. Bundle multiple wires i
 
 **Also check out my new Timeline node:**  https://github.com/chanon/comfyui-obvpm-timeline It not only lets you extend videos seamlessly, but also **prepend, bridge and even create seamless loops with motion context**!
 
+### Latest HEAD
+
+- Mute Group If works inside a subgraph: it mutes the group around the subgraph's node.
+- Mute Group If no longer shows a status line ("running …" / "muting …") under its widgets, and a new one is no taller than its two widgets.
+- New, for other packs: a node of another pack can set a bundle constant itself (`obvpmConstantWidget`) and name its fields for Unbundle.
+
 ### 0.2.12 (2026-10-04)
 
 - Value Presets: a node that reads a constant by name, with no Get node in between (a node offering `obvpmConstantRead()`), now counts as reading it. Before, a value whose only reader was such a node seemed to go nowhere, so the presets feeding it faded although they were used.
@@ -314,6 +320,8 @@ Bundle and Unbundle can be joined by a **constant name** instead of a wire, the 
 
 Collapsed, a node with set or get on shows its title, like a collapsed KJNodes Set/Get.
 
+A node from another pack can be a setter too, always on, with a name field of its own, and an Unbundle that gets that name takes out its fields.
+
 **Compatible with KJNodes Set/Get.** The names are shared in both directions:
 
 - A KJNodes **Get** lists the names Bundles set, and outputs that bundle.
@@ -435,7 +443,8 @@ Passes any input through unchanged; when the `mute` boolean is true, blocks ever
 Mutes **the group it sits in** while `mute` is true (or while it is false, with `invert` on): every node in the frame is set to *Never*, so ComfyUI leaves it out of the run altogether -- loaders, samplers, save nodes, everything -- and draws it greyed. When the value turns, the group comes back.
 
 - **Which group:** the smallest group frame holding the node's centre; its nodes are those whose centre is inside that frame (the frontend's own rule for what a group moves). Drag the node to another group and the muting follows it; outside every group it mutes nothing. The node itself is never muted.
-- **The value has to be known before the run**, because muting happens while the prompt is built: a widget, a primitive, a Value Presets field (through Unbundle or Get/Set), a Not of one, or a node that says so, like the timeline's upscale toggle. The nodes feeding it (a Get, a Not) are never muted, so they can sit beside it inside the group. When the value cannot be told, the group is left **on** -- the safe side wherever a switch or gate still decides at run time. The node's face says what it is doing.
+- **Inside a subgraph** (say, the switch and its Get tidied into one), with no group around it in there, it acts on the group around the subgraph's node in the graph that holds it -- climbing on while that node is in no group either -- and does so for each place the subgraph is used. The subgraph's node is never muted (it holds the switch), nor what feeds it. A group drawn inside the subgraph still wins.
+- **The value has to be known before the run**, because muting happens while the prompt is built: a widget, a primitive, a Value Presets field (through Unbundle or Get/Set), a Not of one, or a node that says so, like the timeline's upscale toggle. The nodes feeding it (a Get, a Not) are never muted, so they can sit beside it inside the group. When the value cannot be told, the group is left **on** -- the safe side wherever a switch or gate still decides at run time. The node shows no status line: the greyed group is the answer.
 - **Only what it muted comes back:** a node you muted or bypassed yourself keeps its mode. Several Mute Group If nodes can cover the same nodes (nested groups); a node stays muted while any of them wants it.
 - It applies whenever the value changes, and once more right before every queue. The node itself never runs (no outputs).
 

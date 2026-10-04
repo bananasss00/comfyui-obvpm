@@ -17,6 +17,12 @@
 // The nodes feeding a Mute Group If (its Get, a Not) are never muted
 // either, so they may sit beside it inside the group it controls.
 //
+// Inside a subgraph with no group around it there, it acts on the group
+// around the subgraph's node in the graph that holds it (climbing further
+// while that node is in no group either) -- once per place the subgraph
+// is used. The subgraph's node itself is never muted (it holds the
+// switch), nor what feeds it. A group inside the subgraph still wins.
+//
 // Only nodes a Mute Group If muted are unmuted again (they carry FLAG): a
 // node muted or bypassed by hand keeps its mode. Several of these may
 // cover one node; it stays muted while any of them wants it muted. A value
@@ -29,7 +35,6 @@
 
 import { app } from "../../scripts/app.js";
 import { staticInput } from "./obvpm_dynamic.js";
-import { legacyCanvasBox } from "./obvpm_ui.js";
 
 export const TYPE = "MuteGroupIf (obvpm)";
 export const FLAG = "obvpm_group_muted";
@@ -37,7 +42,6 @@ const ALWAYS = 0;
 const NEVER = 2;
 const BYPASS = 4;
 const POLL_MS = 400;
-const STATUS_H = 22;
 
 function graphsOf(root) {
     const out = [];
@@ -52,9 +56,37 @@ function graphsOf(root) {
     return out;
 }
 
+/** graph -> [{holder, parent}]: each node that uses a subgraph, and the
+ *  graph that node sits in. */
+function hostsOf(graphs) {
+    const hosts = new Map();
+    for (const parent of graphs) {
+        for (const holder of parent._nodes ?? parent.nodes ?? []) {
+            if (!holder.subgraph) continue;
+            if (!hosts.has(holder.subgraph)) hosts.set(holder.subgraph, []);
+            hosts.get(holder.subgraph).push({ holder, parent });
+        }
+    }
+    return hosts;
+}
+
+/** Where a controller (or the subgraph node holding it) acts: the group
+ *  around it in its own graph, else -- in a subgraph -- the group around
+ *  each node using that subgraph, climbing on while there is none.
+ *  [{graph, group, holders}]: `holders` are the subgraph nodes climbed
+ *  through, which hold the controller and are never muted. */
+function targetsOf(graph, node, hosts, holders = [], depth = 0) {
+    const group = groupOf(graph, node);
+    if (group) return [{ graph, group, holders }];
+    if (depth > 8) return [];
+    return (hosts.get(graph) ?? []).flatMap(({ holder, parent }) =>
+        targetsOf(parent, holder, hosts, [...holders, holder], depth + 1));
+}
+
 function centre(node) {
     const r = node.boundingRect;
-    if (r && r.length >= 4) return [r[0] + r[2] / 2, r[1] + r[3] / 2];
+    // (all zeros on a node not drawn yet -- a subgraph just made: use pos)
+    if (r && r.length >= 4 && (r[2] || r[3])) return [r[0] + r[2] / 2, r[1] + r[3] / 2];
     const title = (typeof LiteGraph !== "undefined" && LiteGraph.NODE_TITLE_HEIGHT) || 30;
     return [node.pos[0] + node.size[0] / 2, node.pos[1] - title + (node.size[1] + title) / 2];
 }
@@ -119,43 +151,62 @@ function setMode(node, mode) {
 }
 
 /** Bring every graph's muting in line with its Mute Group If nodes; true
- *  when any node's mode changed. Each controller gets `__obvpmMuteStatus`. */
+ *  when any node's mode changed. Each controller gets `__obvpmMuteStatus`
+ *  (what it is doing, for diagnostics -- the node shows no status line:
+ *  the greyed group says it). */
 export function applyMuteGroups(root) {
-    let changed = false;
-    for (const graph of graphsOf(root)) {
-        const nodes = graph._nodes ?? graph.nodes ?? [];
-        const muteSet = new Set();
-        const exempt = new Set();
-        for (const ctl of nodes) {
-            if (ctl.type === TYPE) sourcesOf(graph, ctl, exempt);
-        }
-        for (const ctl of nodes) {
+    const graphs = graphsOf(root);
+    const hosts = hostsOf(graphs);
+    // Decided over every graph first, then applied: a controller in a
+    // subgraph may act on the graph around it.
+    const muteSet = new Set();
+    const keep = new Set();         // feeders and holders: never muted
+    const acts = [];
+    for (const graph of graphs) {
+        for (const ctl of graph._nodes ?? graph.nodes ?? []) {
             if (ctl.type !== TYPE) continue;
-            const group = groupOf(graph, ctl);
-            const off = ctl.mode === NEVER || ctl.mode === BYPASS;
-            const want = off ? false : wantsMute(ctl);
-            let status;
-            if (!group) {
-                status = { text: "not in a group", tone: "dim" };
-            } else {
-                const b = frame(group);
-                const members = nodes.filter((n) => n !== ctl && n.type !== TYPE && !exempt.has(n)
-                                                    && inside(centre(n), b));
-                if (want === true) members.forEach((n) => muteSet.add(n));
-                const name = String(group.title ?? "group");
-                status = off ? { text: "switched off: " + name + " left on", tone: "dim" }
-                    : want === true ? { text: `muting ${name} (${members.length})`, tone: "off" }
-                    : want === false ? { text: `running ${name} (${members.length})`, tone: "on" }
-                    : { text: "value not known before the run: " + name + " left on", tone: "warn" };
+            sourcesOf(graph, ctl, keep);
+            const targets = targetsOf(graph, ctl, hosts);
+            for (const t of targets) {
+                for (const h of t.holders) keep.add(h);
+                // what feeds the subgraph node the switch climbed out of
+                const last = t.holders[t.holders.length - 1];
+                if (last) sourcesOf(t.graph, last, keep);
             }
-            if (JSON.stringify(status) !== JSON.stringify(ctl.__obvpmMuteStatus)) {
-                ctl.__obvpmMuteStatus = status;
-                ctl.__obvpmStatusWidget?.triggerDraw?.();
-                ctl.setDirtyCanvas?.(true, false);
-            }
+            acts.push({ ctl, targets });
         }
+    }
+    for (const { ctl, targets } of acts) {
+        const off = ctl.mode === NEVER || ctl.mode === BYPASS;
+        const want = off ? false : wantsMute(ctl);
+        let status;
+        if (!targets.length) {
+            status = { text: "not in a group", tone: "dim" };
+        } else {
+            let count = 0;
+            for (const t of targets) {
+                const b = frame(t.group);
+                const members = (t.graph._nodes ?? t.graph.nodes ?? []).filter(
+                    (n) => n !== ctl && n.type !== TYPE && !keep.has(n)
+                           && inside(centre(n), b));
+                if (want === true) members.forEach((n) => muteSet.add(n));
+                count += members.length;
+            }
+            const name = String(targets[0].group.title ?? "group")
+                + (targets.length > 1 ? ` (+${targets.length - 1} more)` : "");
+            status = off ? { text: "switched off: " + name + " left on", tone: "dim" }
+                : want === true ? { text: `muting ${name} (${count})`, tone: "off" }
+                : want === false ? { text: `running ${name} (${count})`, tone: "on" }
+                : { text: "value not known before the run: " + name + " left on", tone: "warn" };
+        }
+        if (JSON.stringify(status) !== JSON.stringify(ctl.__obvpmMuteStatus)) {
+            ctl.__obvpmMuteStatus = status;
+        }
+    }
+    let changed = false;
+    for (const graph of graphs) {
         let graphChanged = false;
-        for (const n of nodes) {
+        for (const n of graph._nodes ?? graph.nodes ?? []) {
             if (n.type === TYPE) continue;
             const mute = muteSet.has(n);
             if (mute && n.mode === ALWAYS) {
@@ -178,37 +229,6 @@ export function applyMuteGroups(root) {
         window.dispatchEvent?.(new CustomEvent("obvpm:modes-changed"));
     }
     return changed;
-}
-
-const TONES = { on: "#69db7c", off: "#ffa94d", warn: "#ff6b6b", dim: null };
-
-function addStatus(node) {
-    const widget = {
-        name: "status",
-        type: "obvpm_mute_group_status",
-        value: "",
-        serialize: false,
-        options: { serialize: false },
-        computeSize: (width) => [width, STATUS_H],
-        computeLayoutSize: () => ({ minHeight: STATUS_H, maxHeight: STATUS_H, minWidth: 0 }),
-        draw(ctx, _node, width, y) {
-            [width] = legacyCanvasBox(ctx, width, STATUS_H, false);
-            const s = node.__obvpmMuteStatus ?? { text: "…", tone: "dim" };
-            ctx.save();
-            ctx.font = "12px sans-serif";
-            ctx.textBaseline = "middle";
-            ctx.fillStyle = TONES[s.tone] ?? (LiteGraph?.WIDGET_SECONDARY_TEXT_COLOR ?? "#999");
-            let text = s.text;
-            const room = (width || node.size[0]) - 20;
-            while (text.length > 4 && ctx.measureText(text).width > room) text = text.slice(0, -2);
-            if (text !== s.text) text = text.slice(0, -1) + "…";
-            ctx.fillText(text, 10, y + STATUS_H / 2);
-            ctx.restore();
-        },
-    };
-    node.addCustomWidget(widget);
-    Object.defineProperty(widget, "width", { configurable: true, get: () => undefined, set: () => {} });
-    node.__obvpmStatusWidget = widget;
 }
 
 let timer = null;
@@ -234,10 +254,26 @@ app.registerExtension({
     },
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData?.name !== TYPE) return;
+        // As tall as its widgets. Litegraph sizes a node from its slot
+        // rows -- at least one, `max(inputs, outputs, 1)` -- plus its
+        // widgets; this node has no outputs and its only inputs are the
+        // widgets' own sockets, drawn in the widget rows, so that one row
+        // was an empty strip under them. (A loaded node keeps the size it
+        // was saved with.)
+        const computeSize = nodeType.prototype.computeSize;
+        nodeType.prototype.computeSize = function (out) {
+            const size = computeSize.call(this, out);
+            const slots = (this.outputs?.length ?? 0) > 0
+                || (this.inputs ?? []).some((i) => !i.widget);
+            if (!slots) {
+                const row = (typeof LiteGraph !== "undefined" && LiteGraph.NODE_SLOT_HEIGHT) || 20;
+                size[1] = Math.max(0, size[1] - row);
+            }
+            return size;
+        };
         const onNodeCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             const r = onNodeCreated?.apply(this, arguments);
-            addStatus(this);
             if (!timer) {
                 const tick = () => {
                     try {

@@ -169,3 +169,89 @@ test("subgraphs are walked too", () => {
     M.applyMuteGroups({ _nodes: [holder], _groups: [] });
     assert.equal(inner.mode, NEVER);
 });
+
+// ---- in a subgraph: the group around the subgraph's node ----------------
+// a subgraph node at (x, y) holding `sub`
+const holder = (x, y, sub) => node(x, y, { subgraph: sub });
+
+test("in a subgraph with no group of its own: mutes the group around the subgraph's node, never that node", () => {
+    const inside = node(20, 20);
+    const c = ctl(10, 10, true);
+    const sub = { _nodes: [c, inside], _groups: [] };
+    const { n, graph } = scene();
+    const h = holder(30, 30, sub);           // in Generate
+    graph._nodes.push(h);
+    M.applyMuteGroups(graph);
+    for (const k of ["a", "b", "deep"]) assert.equal(n[k].mode, NEVER, k);
+    assert.equal(h.mode, ALWAYS);             // it holds the switch
+    assert.equal(inside.mode, ALWAYS);        // the subgraph's own nodes are left alone
+    assert.equal(n.u1.mode, ALWAYS);
+    assert.match(c.__obvpmMuteStatus.text, /^muting Generate/);
+});
+
+test("a group inside the subgraph still wins", () => {
+    const inside = node(20, 20);
+    const sub = { _nodes: [ctl(10, 10, true), inside], _groups: [group("Inside", 0, 0, 100, 100)] };
+    const { n, graph } = scene();
+    graph._nodes.push(holder(30, 30, sub));
+    M.applyMuteGroups(graph);
+    assert.equal(inside.mode, NEVER);
+    assert.equal(n.a.mode, ALWAYS);
+});
+
+test("one subgraph used twice: each use mutes the group it sits in", () => {
+    const sub = { _nodes: [ctl(10, 10, true)], _groups: [] };
+    const { n, graph } = scene();
+    const h1 = holder(30, 30, sub), h2 = holder(230, 30, sub);
+    graph._nodes.push(h1, h2);
+    M.applyMuteGroups(graph);
+    assert.equal(n.a.mode, NEVER);
+    assert.equal(n.u1.mode, NEVER);
+    assert.equal(h1.mode, ALWAYS);
+    assert.equal(h2.mode, ALWAYS);
+    assert.equal(n.free.mode, ALWAYS);
+});
+
+test("climbs on through a subgraph node that is in no group either", () => {
+    const c = ctl(10, 10, true);
+    const deepest = { _nodes: [c], _groups: [] };
+    const h2 = holder(500, 500, deepest);     // no group in the middle graph
+    const middle = { _nodes: [h2, node(600, 600)], _groups: [] };
+    const { n, graph } = scene();
+    const h1 = holder(30, 30, middle);        // in Generate
+    graph._nodes.push(h1);
+    M.applyMuteGroups(graph);
+    assert.equal(n.a.mode, NEVER);
+    assert.equal(h1.mode, ALWAYS);
+    assert.equal(h2.mode, ALWAYS);
+    assert.equal(middle._nodes[1].mode, ALWAYS);
+});
+
+test("what feeds the subgraph node stays on, and turning the value unmutes", () => {
+    const c = ctl(10, 10, true);
+    const sub = { _nodes: [c], _groups: [] };
+    const { n, graph } = scene();
+    const get = node(15, 15);                 // in Generate, wired into the subgraph node
+    const h = holder(30, 30, sub);
+    h.inputs = [{ name: "value", link: 7 }];
+    graph._nodes.push(h, get);
+    graph.links = { 7: { origin_id: get.id } };
+    graph.getNodeById = (id) => graph._nodes.find((x) => x.id === id);
+    M.applyMuteGroups(graph);
+    assert.equal(n.a.mode, NEVER);
+    assert.equal(get.mode, ALWAYS);
+    c.values.mute = false;
+    M.applyMuteGroups(graph);
+    assert.equal(n.a.mode, ALWAYS);
+    assert.equal(n.a.properties[M.FLAG], undefined);
+});
+
+test("in a subgraph whose node is in no group anywhere: mutes nothing", () => {
+    const c = ctl(10, 10, true);
+    const sub = { _nodes: [c], _groups: [] };
+    const { n, graph } = scene();
+    graph._nodes.push(holder(500, 400, sub));
+    M.applyMuteGroups(graph);
+    assert.equal(n.a.mode, ALWAYS);
+    assert.equal(c.__obvpmMuteStatus.text, "not in a group");
+});

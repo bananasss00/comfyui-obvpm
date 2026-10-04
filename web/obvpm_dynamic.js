@@ -355,6 +355,15 @@ export function bundleNamesFor(node, slotName, depth = 0) {
     if (isUnbundle(origin)) {
         return packerOf(node, slotName, depth)?.names ?? null;
     }
+    // Another pack's node that puts out a bundle of its own names its
+    // fields itself: `node.obvpmBundleNames(slot)` -> [name, ...].
+    if (typeof origin.obvpmBundleNames === "function") {
+        try {
+            return origin.obvpmBundleNames(src.slot) ?? null;
+        } catch (err) {
+            return null;
+        }
+    }
     // Read the Bundle's list the same way it does, so a wired-in list
     // resolves here too.
     if (widget(origin, "names")) return listLines(origin, "names");
@@ -430,6 +439,16 @@ export function staticOutput(node, slot, depth = 0) {
         const field = out ? (out.label || out.localized_name || out.name) : "";
         if (!field) return undefined;
         const src = bundleSourceFor(node, "in");
+        // another pack's bundle: `node.obvpmBundleValue(field)` answers
+        // a field known before the run (undefined when it cannot tell)
+        if (typeof src?.node?.obvpmBundleValue === "function") {
+            if (src.node.mode === 2 || src.node.mode === 4) return undefined;
+            try {
+                return src.node.obvpmBundleValue(field);
+            } catch (err) {
+                return undefined;
+            }
+        }
         if (src?.node?.type === PRESETS_NODE) {
             try {
                 const values = JSON.parse(widget(src.node, "values")?.value || "{}");

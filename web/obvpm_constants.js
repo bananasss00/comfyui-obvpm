@@ -46,6 +46,14 @@ export const VALUE_PRESETS = "ValuePresets (obvpm)";
 export const OVERRIDE = "OverrideBundleValues (obvpm)";
 // The setters that keep their own title and show the name as a field.
 const OWN_TITLE = new Set([VALUE_PRESETS, OVERRIDE]);
+// Another pack's node can set a bundle constant of its own, ALWAYS on (no
+// option): its class names the widget holding the constant's name on its
+// prototype, `obvpmConstantWidget = "<widget name>"`, and puts a bundle on
+// its output 0. It keeps its own title; an empty name sets nothing. (The
+// H3 Timeline sets its outputs this way.)
+const hooked = (node) => typeof node?.obvpmConstantWidget === "string"
+    && !!node.obvpmConstantWidget;
+const ownTitle = (node) => OWN_TITLE.has(node?.type) || hooked(node);
 const KJ_SET = "SetNode";
 const KJ_GET = "GetNode";
 const BUNDLE_TYPE = "OBVPM_BUNDLE";   // see h3/wiretypes.py
@@ -67,6 +75,7 @@ const HOLLOW_CIRCLE = 7;  // RenderShape.HollowCircle: `in` is optional
 /** "set" on a Bundle, "get" on an Unbundle, else null. */
 function kindOf(node) {
     if (node?.__obvpmConstKind) return node.__obvpmConstKind;
+    if (hooked(node)) return "set";
     if (node?.type === BUNDLE) return "set";
     if (node?.type === UNBUNDLE) return "get";
     return null;
@@ -74,18 +83,19 @@ function kindOf(node) {
 
 /** Is this Bundle / Unbundle's set / get option on? */
 export function constantOn(node) {
+    if (hooked(node)) return true;
     return !!node?.properties?.[MODE_PROP];
 }
 
 function nameWidget(node) {
-    const want = kindOf(node) === "get" ? GET_W : SET_W;
+    const want = kindOf(node) === "get" ? GET_W
+        : (hooked(node) ? node.obvpmConstantWidget : SET_W);
     return node?.widgets?.find((w) => w.name === want) ?? null;
 }
 
 /** A Bundle or Value Presets node with its set option on. */
 export function isOurSetter(node) {
-    return (node?.type === BUNDLE || OWN_TITLE.has(node?.type))
-        && constantOn(node);
+    return (node?.type === BUNDLE || ownTitle(node)) && constantOn(node);
 }
 
 /** An Unbundle with its get option on. */
@@ -245,7 +255,7 @@ function titleFor(node) {
 
 /** On: the title follows the name. The replaced title is kept. */
 function retitle(node) {
-    if (!constantOn(node) || OWN_TITLE.has(node.type)) return;
+    if (!constantOn(node) || ownTitle(node)) return;
     node.properties ??= {};
     if (node.properties[TITLE_PROP] == null) {
         node.properties[TITLE_PROP] = node.title ?? "";
@@ -259,7 +269,7 @@ function retitle(node) {
 
 /** Off: the title it had before. */
 function restoreTitle(node) {
-    if (OWN_TITLE.has(node.type)) return;
+    if (ownTitle(node)) return;
     const kept = node.properties?.[TITLE_PROP];
     if (kept == null) return;
     delete node.properties[TITLE_PROP];
@@ -569,8 +579,9 @@ function setup(node, kind) {
             };
         }
     }
-    dropWidgetSockets(node, [kind === "get" ? GET_W : SET_W]);
-    showNameWidget(node, false);
+    dropWidgetSockets(node, [nameWidget(node)?.name ?? (kind === "get" ? GET_W : SET_W)]);
+    // shown from the start only where it is always on
+    showNameWidget(node, hooked(node));
 
     const onAdded = node.onAdded;
     node.onAdded = function () {
@@ -964,7 +975,7 @@ app.registerExtension({
         // Unbundle is set up -- with its option off it is exactly the
         // node it always was.
         const cls = node.comfyClass ?? node.constructor?.comfyClass ?? node.type;
-        if (cls === BUNDLE || OWN_TITLE.has(cls)) setup(node, "set");
+        if (cls === BUNDLE || OWN_TITLE.has(cls) || hooked(node)) setup(node, "set");
         else if (cls === UNBUNDLE) setup(node, "get");
     },
     setup() {
