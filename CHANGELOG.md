@@ -2,7 +2,7 @@
 
 Changes not yet in a release are listed under **Latest HEAD**; they become a numbered version when the pack is released.
 
-## Latest HEAD
+## 0.2.14 (2026-10-05)
 
 - Bundle and Unbundle settings: **Enter** is OK -- from a name field too (a name that is not allowed still keeps the dialog open with the reason). Not on a focused button (Enter presses that one) or a dropdown.
 - Mute Group If inside a subgraph: with no group around it in there, it acts on the group around the subgraph's node in the graph that holds it (climbing on while that node is in no group either), once for each place the subgraph is used -- so the switch and its Get can be tidied into a subgraph. The subgraph's node is never muted (it holds the switch), nor what feeds it; a group inside the subgraph still wins. Before, such a switch was "not in a group" and muted nothing. Also right for a subgraph just made, before it is first drawn.
