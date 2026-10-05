@@ -590,23 +590,34 @@ function throughSubgraph(origin, slot) {
  * Same graph first, then UPWARD through the subgraph instance -- the
  * direction KJNodes itself resolves the pair, and the only one that can
  * be answered from inside (a subgraph cannot see which sibling graphs
- * exist, but it can see out). The climb reuses instanceOf's rule:
- * several instances means no single answer, so the trace stops rather
- * than picking one.
+ * exist, but it can see out). A subgraph used in several places climbs
+ * out of every one of them: the answer stands when they all reach the
+ * SAME setter (a switch subgraph pasted into two groups of one graph),
+ * and is null when they could differ -- one instance finds it and
+ * another does not, or they find different setters -- rather than
+ * picking one.
  */
 function setterFor(getNode) {
     // Either family on either end: KJNodes' Set/Get and our Bundle "set"
     // / Unbundle "get" share one namespace (obvpm_constants.js).
     const key = constantOf(getNode);
     if (!key) return null;
-    let g = getNode.graph;
-    for (let depth = 0; g && depth < 8; depth++) {
+    const find = (g, depth) => {
+        if (!g || depth >= 8) return null;
         const hit = (g._nodes ?? g.nodes ?? []).find(
             (n) => isConstantSetter(n) && constantOf(n) === key);
         if (hit) return hit;
-        g = instanceOf(g)?.graph ?? null;
-    }
-    return null;
+        const parents = [...new Set(instancesOf(g).map((n) => n.graph))];
+        if (!parents.length) return null;
+        let found = null;
+        for (const p of parents) {
+            const h = find(p, depth + 1);
+            if (!h || (found && h !== found)) return null;
+            found = h;
+        }
+        return found;
+    };
+    return find(getNode.graph, 0);
 }
 
 /**
@@ -619,6 +630,15 @@ function setterFor(getNode) {
  * is the opposite case, and that is what throughSubgraph is for.
  */
 function instanceOf(sub) {
+    const found = instancesOf(sub);
+    // A definition can have several instances, and from inside there is no
+    // way to tell which one is being looked at -- answer only when there
+    // is exactly one, rather than picking.
+    return found.length === 1 ? found[0] : null;
+}
+
+/** Every node that uses subgraph `sub`, at any depth. */
+function instancesOf(sub) {
     const root = app.graph ?? app.rootGraph;
     const found = [];
     const walk = (g, level) => {
@@ -629,10 +649,7 @@ function instanceOf(sub) {
         }
     };
     walk(root, 0);
-    // A definition can have several instances, and from inside there is no
-    // way to tell which one is being looked at -- answer only when there
-    // is exactly one, rather than picking.
-    return found.length === 1 ? found[0] : null;
+    return found;
 }
 
 /** Is this link coming from the subgraph's own input boundary? */
