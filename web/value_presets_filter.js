@@ -1,6 +1,7 @@
 // Value Presets: DROPDOWN FILTERS -- a user's own short list of a
 // field's dropdown, kept with their user presets (the `filters` part of
-// user/<user>/obvpm/presets/<Preset Type Id>.json) and so shared by
+// user/<user>/obvpm/presets/<Preset Type Id>.json, the id's settings file
+// beside the folder of its presets) and so shared by
 // every node with that Preset Type Id, in every workflow.
 //
 // A DISPLAY FILTER, NOTHING MORE. The server never hears of it: the

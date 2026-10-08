@@ -1,7 +1,6 @@
-// Value Presets dropdown filters (web/value_presets_filter.js) and their
-// place in the user presets file (web/value_presets_user.js): what a
-// filter lists, what it never hides, and that saving one part of the
-// file keeps the other.
+// Value Presets dropdown filters (web/value_presets_filter.js): what a
+// filter lists and what it never hides. Where they are kept is
+// test_presets_user_files.mjs.
 //   node --experimental-vm-modules --test tests/test_presets_filter.mjs
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -97,36 +96,4 @@ test("filters from a file: bad entries dropped, empty fields dropped", async () 
     });
     assert.deepEqual(plain(got), { model: { include: ["h3", "fast"], exclude: ["fp8"] } });
     assert.deepEqual(plain(F.patternsFrom("a\n\n  b \r\nc")), ["a", "b", "c"]);
-});
-
-test("saving filters keeps the presets, saving presets keeps the filters", async () => {
-    const files = new Map([["obvpm/presets/h3-engine.json", JSON.stringify({
-        format: "obvpm-value-presets", version: 1, type_id: "h3-engine",
-        presets: { quality: { steps: 20 } } })]]);
-    const { U } = await load(files);
-    await U.saveUserFilters("h3-engine", { model: { include: ["h3/"], exclude: [] } });
-    let saved = JSON.parse(files.get("obvpm/presets/h3-engine.json"));
-    assert.deepEqual(saved.presets, { quality: { steps: 20 } });
-    assert.deepEqual(saved.filters, { model: { include: ["h3/"], exclude: [] } });
-    await U.saveUserPresets("h3-engine", { quality: { steps: 20 }, fast: { steps: 4 } });
-    saved = JSON.parse(files.get("obvpm/presets/h3-engine.json"));
-    assert.deepEqual(saved.filters, { model: { include: ["h3/"], exclude: [] } });
-    assert.deepEqual(Object.keys(saved.presets), ["quality", "fast"]);
-    assert.deepEqual(plain(U.userFilters("h3-engine")), saved.filters);
-});
-
-test("a file that cannot be read is never written over", async () => {
-    const files = new Map([["obvpm/presets/broken.json", "{ not json"]]);
-    const { U, writes } = await load(files);
-    await assert.rejects(U.saveUserFilters("broken", { model: { include: ["x"], exclude: [] } }),
-                         /not saved/);
-    await assert.rejects(U.saveUserPresets("broken", { a: { steps: 1 } }), /not saved/);
-    assert.deepEqual(writes, []);
-    assert.equal(files.get("obvpm/presets/broken.json"), "{ not json");
-});
-
-test("no filters, no filters key: older readers see the file they knew", async () => {
-    const { U, files } = await load();
-    await U.saveUserPresets("plain", { a: { steps: 1 } });
-    assert.equal("filters" in JSON.parse(files.get("obvpm/presets/plain.json")), false);
 });

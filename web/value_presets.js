@@ -12,8 +12,8 @@ import { trace, listenForPageErrors, loadStarted, loadFinished,
          reportText, copyText } from "./value_presets_diag.js";
 import { STAR, typeIdOf, cleanTypeId, isUserLabel, bareName,
          userPresets, userPresetsError, loadUserPresets, saveUserPresets,
-         userFilters, saveUserFilters, onUserPresetsChange, exportText, parseImport, mergePresets,
-         pickPresets, exportFileName, download } from "./value_presets_user.js";
+         userFilters, saveUserFilters, onUserPresetsChange, presetFileText, parseImports,
+         mergePresets, pickPresets, exportFileName, download } from "./value_presets_user.js";
 import { constantOn, setMode } from "./obvpm_constants.js";
 import { restoreRows, restoreWrites } from "./value_presets_restore.js";
 import { filterChoices, filterNote, filtersFrom, patternsFrom }
@@ -1742,7 +1742,7 @@ function presetsPane(node, overlay, say) {
         typeIdBox));
     pane.append(section("User Presets",
         hint("User presets are saved in the ComfyUI user folder at "
-             + "user/default/obvpm/presets/<preset-type-id>.json.\n"
+             + "user/default/obvpm/presets/<preset-type-id>/, one file per preset.\n"
              + "This allows using the same user presets across workflow "
              + "files. Uncheck presets to hide them from the selection "
              + "dropdown."),
@@ -1785,75 +1785,69 @@ function presetsPane(node, overlay, say) {
         ownList));
 
     // -- export / import
-    const exportBtn = pushButton("Export…", () => popOver(overlay, "Export presets",
+    const exportBtn = pushButton("Export…", () => popOver(overlay, "Export a preset",
         "min(700px, 92vw)", (box, close) => {
             const lib = cleanTypeId(typeId);
-            // the user's own presets are what they share: first, and
-            // picked, whenever there are any
-            const hasUser = !!lib && Object.keys(userPresets(lib)).length > 0;
-            let what = hasUser ? "user" : "workflow";
-            // the presets of the source picked, and which of them go out:
-            // all at first, or only one to share it
-            let source = Object.create(null);
-            let names = [];
-            const chosen = new Set();
+            // every preset there is to send, the user's own first (they
+            // are what people share); one is picked, and that one goes
+            const byName = (a, b) => a.localeCompare(b);
+            const mine = lib ? userPresets(lib) : Object.create(null);
+            const flow = readJson(node, PRESETS);
+            const entries = [
+                ...Object.keys(mine).sort(byName).map((name) => ({
+                    label: STAR + name, name, values: mine[name], where: "user preset" })),
+                ...Object.keys(flow).sort(byName).map((name) => ({
+                    label: name, name, values: flow[name], where: "workflow preset" })),
+            ];
+            // the node's own preset when it is one of them
+            let pick = entries.find((x) => x.label === selected(node)) ?? entries[0] ?? null;
             const area = textArea("");
-            const picks = el("div");
-            const empty = hint("");
-            const picked = () => names.filter((n) => chosen.has(n));
+            area.readOnly = true;
             const copyBtn = pushButton("Copy", async () => {
                 try {
                     await navigator.clipboard.writeText(area.value);
-                    say(picked().length === 1 ? `Copied the preset '${picked()[0]}'.`
-                                              : "Copied the presets.");
+                    say(`Copied the preset '${pick.name}'.`);
                 } catch (err) {
                     area.select();
                     say("Select the text and copy it (the clipboard is not available here).");
                 }
             });
             const downloadBtn = pushButton("Download", () => {
-                download(exportFileName(picked(), lib || node.title), area.value);
+                download(exportFileName(pick.name), area.value);
             }, { fontWeight: "600" });
             const paint = () => {
-                const list = picked();
-                area.value = list.length ? exportText({
-                    typeId: lib, presets: pickPresets(source, list),
-                }) : "";
-                enable(copyBtn, list.length > 0);
-                enable(downloadBtn, list.length > 0);
+                area.value = pick ? presetFileText({ typeId: lib, name: pick.name,
+                                                     values: pick.values }) : "";
+                enable(copyBtn, !!pick);
+                enable(downloadBtn, !!pick);
             };
-            const fill = () => {
-                source = Object.create(null);
-                if (what !== "user") Object.assign(source, readJson(node, PRESETS));
-                if (what !== "workflow" && lib) Object.assign(source, userPresets(lib));
-                names = Object.keys(source).sort((a, b) => a.localeCompare(b));
-                chosen.clear();
-                for (const n of names) chosen.add(n);
-                picks.replaceChildren(pickList(names, chosen, paint));
-                empty.textContent = names.length ? "" : "There are no presets here to export.";
-                empty.style.display = names.length ? "none" : "";
-                paint();
-            };
+            const list = el("div", { display: "flex", flexDirection: "column", gap: "3px",
+                                     maxHeight: "220px", overflowY: "auto" });
+            for (const x of entries) {
+                const row = el("label", { display: "flex", alignItems: "center", gap: "8px",
+                                          cursor: "pointer" });
+                const r = el("input");
+                r.type = "radio";
+                r.name = "obvpm-export-pick";
+                r.checked = x === pick;
+                r.addEventListener("change", () => { if (r.checked) { pick = x; paint(); } });
+                row.append(r, el("span", { flex: "1" }, x.label),
+                           el("span", { color: DIM, font: "12px sans-serif" }, x.where));
+                list.append(row);
+            }
             box.append(
-                radioRow("obvpm-export-what", hasUser ? [
-                    { label: "user presets", value: "user" },
-                    { label: "workflow presets", value: "workflow" },
-                    { label: "both", value: "both" },
-                ] : [
-                    { label: "workflow presets", value: "workflow" },
-                    ...(lib ? [{ label: "user presets", value: "user" },
-                               { label: "both", value: "both" }] : []),
-                ], what, (v) => { what = v; fill(); }),
-                picks, empty,
+                entries.length ? list : hint("There are no presets here to export."),
                 area,
-                hint("Untick what you do not want to send -- one ticked preset "
-                     + "makes a file of just that preset. Send this text or the "
-                     + "file to someone: they import it on their Value Presets "
-                     + "node (config → Presets → Import)."));
+                hint("One preset per file. Send this text or the file to someone: "
+                     + "they import it on their Value Presets node (config → Presets "
+                     + "→ Import). It is the same file as in the user presets folder"
+                     + (lib ? " (user/default/obvpm/presets/" + lib + "/)" : "")
+                     + ", so it can also be dropped in there. To move all your user "
+                     + "presets at once, copy that folder."));
             const row = el("div", { display: "flex", gap: "6px", justifyContent: "flex-end" });
             row.append(pushButton("Close", close), copyBtn, downloadBtn);
             box.append(row);
-            fill();
+            paint();
         }));
     const importBtn = pushButton("Import…", () => popOver(overlay, "Import presets",
         "min(700px, 92vw)", (box, close) => {
@@ -1861,7 +1855,7 @@ function presetsPane(node, overlay, say) {
             let into = "workflow";
             let mode = "keep";
             const area = textArea("", "180px");
-            area.placeholder = "Paste an exported presets file here, or open one.";
+            area.placeholder = "Paste an exported preset here, or open preset files.";
             const status = el("div", { color: "#e88", whiteSpace: "pre-wrap" });
             // what the text holds, and which of its presets come in: all
             // at first, or only the one wanted from a shared file
@@ -1899,15 +1893,19 @@ function presetsPane(node, overlay, say) {
                         ? "already there" : "")) : "");
                 enable(importBtn, chosen.size > 0);
             };
+            // the files opened, as [name, text]: read instead of the box
+            // while the box is empty (typing in it drops them)
+            let opened = [];
             const read = () => {
                 got = null;
                 names = [];
                 chosen.clear();
                 status.textContent = "";
-                if (area.value.trim()) {
-                    const r = parseImport(area.value);
-                    if (r.error) status.textContent = r.error;
-                    else got = r;
+                const texts = area.value.trim() ? [["the text", area.value]] : opened;
+                if (texts.length) {
+                    const r = parseImports(texts);
+                    if (r.errors.length) status.textContent = r.errors.join("\n");
+                    if (Object.keys(r.presets).length) got = r;
                 }
                 if (got) {
                     names = Object.keys(got.presets).sort((a, b) => a.localeCompare(b));
@@ -1915,15 +1913,21 @@ function presetsPane(node, overlay, say) {
                 }
                 paintPicks();
             };
-            area.addEventListener("input", read);
+            area.addEventListener("input", () => { opened = []; read(); });
             const file = el("input");
             file.type = "file";
+            file.multiple = true;
             file.accept = ".json,application/json";
             file.addEventListener("change", async () => {
-                const f = file.files?.[0];
-                if (!f) return;
-                if (f.size > 1024 * 1024) { status.textContent = "That file is larger than 1 MB."; return; }
-                area.value = await f.text();
+                const picked = [...(file.files ?? [])].slice(0, 200);
+                if (!picked.length) return;
+                opened = [];
+                for (const f of picked) {
+                    opened.push([f.name, f.size > 1024 * 1024 ? "" : await f.text()]);
+                }
+                // one file shows in the box; several are listed below it
+                area.value = opened.length === 1 ? opened[0][1] : "";
+                if (opened.length === 1) opened = [];
                 read();
             });
             box.append(
@@ -1950,10 +1954,10 @@ function presetsPane(node, overlay, say) {
     const buttons = el("div", { display: "flex", gap: "6px" });
     buttons.append(exportBtn, importBtn);
     pane.append(section("Export / import",
-        hint("Move presets between workflows or share them: export copies or "
-             + "downloads them as a small file -- all of them, or only the "
-             + "ones you tick, such as one preset to share; import takes one "
-             + "in, all of it or the presets you tick."),
+        hint("Share a preset or move it between workflows: export copies or "
+             + "downloads one preset as a small file; import takes preset files "
+             + "in -- several at once, or the presets you tick of an older "
+             + "export that holds many."),
         buttons));
 
     return {
@@ -2095,8 +2099,8 @@ function filtersPane(fields, typeIdOf) {
             head.append(el("div", {}, label));
         }
         body.append(head, ...listable.map(rowOfField),
-                    hint("Saved in user/default/obvpm/presets/" + id + ".json, beside "
-                         + "your user presets, on Apply."));
+                    hint("Saved in user/default/obvpm/presets/" + id + ".json (beside "
+                         + "the folder of your user presets), on Apply."));
     }
 
     return {
