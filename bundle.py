@@ -12,7 +12,11 @@ from .common import ANY, _LOG_CASE, _lines
 BUNDLE = "OBVPM_BUNDLE"
 
 
-MAX_FIELDS = 16
+# The declared pool of Bundle inputs / Unbundle outputs. The browser shows
+# only the sockets in use, so a large pool costs nothing on the canvas;
+# 128 is twice Value Presets' 64 fields, so a bundle from one always fits
+# one Unbundle (it was 16 until issue #18).
+MAX_FIELDS = 128
 
 # The constant a Bundle sets / an Unbundle gets, switched on in the node's
 # ⚙ dialog. The link itself is made in the browser (see

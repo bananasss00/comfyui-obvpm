@@ -22,7 +22,7 @@ import { constantOf, constantOn, findConstantSetter,
          setMode } from "./obvpm_constants.js";
 
 // Mirrors MAX_FIELDS in bundle.py: the server's declared out_N pool.
-const MAX_FIELDS = 16;
+const MAX_FIELDS = 128;
 
 // ---------------------------------------------------------------------
 // The layout store
@@ -75,9 +75,11 @@ function linkedOutputNames(node) {
  *   yields None for it and says so) -- dropping it would shift every
  *   later pin's meaning, the exact bug this file exists to prevent.
  * - Deduped and capped at the server's pool: hiding fields is also how a
- *   >16-field bundle chooses which 16 to expose.
+ *   bundle with more fields than that chooses which to expose. `cap:
+ *   false` is the whole list -- what the config dialog offers to choose
+ *   from (capped, it could never show a field past the pool: issue #18).
  */
-export function arrange(traced, layout, linked) {
+export function arrange(traced, layout, linked, { cap = true } = {}) {
     const live = traced ?? layout?.known ?? [];
     const hidden = new Set(layout?.hidden ?? []);
     const seen = new Set();
@@ -93,6 +95,7 @@ export function arrange(traced, layout, linked) {
     }
     for (const name of live) take(name);
     for (const name of linked) take(name);   // never orphan a wire
+    if (!cap) return eff;
     // Over the server's pool, unlinked names give way first: capping a
     // LINKED name off the end would rebuild every slot's links without
     // it -- wires silently gone.
@@ -331,7 +334,7 @@ export function openUnbundleConfig(node) {
     // The full field list, hidden ones included -- what there is to
     // arrange. Effective order first so the dialog opens showing what
     // the node shows, with the hidden names after it.
-    const all = arrange(traced, { ...layout, hidden: [] }, linked);
+    const all = arrange(traced, { ...layout, hidden: [] }, linked, { cap: false });
     const option = constantOption(node, "get");
     if (!all.length) {
         const { overlay, panel, close } = openOverlay("min(420px, 90vw)");
@@ -374,11 +377,20 @@ export function openUnbundleConfig(node) {
     const list = el("div", {
         display: "flex", flexDirection: "column", gap: "2px",
         overflowY: "auto", padding: "4px 2px",
+        // shrinks to the dialog's height and scrolls, however many
+        // fields the bundle has
+        flex: "1 1 auto", minHeight: "0",
     });
-    panel.append(list);
+    const count = el("div", { color: DIM, font: "12px sans-serif" });
+    panel.append(list, count);
 
     function draw() {
         list.replaceChildren();
+        const shown = rows.filter((r) => !r.hidden).length;
+        count.textContent = `${shown} of ${rows.length} fields shown`
+            + (shown > MAX_FIELDS ? ` -- at most ${MAX_FIELDS} outputs: hide `
+               + `${shown - MAX_FIELDS} more` : "");
+        count.style.color = shown > MAX_FIELDS ? "#e88" : DIM;
         rows.forEach((row, index) => {
             const shell = rowShell();
             shell.append(...moveButtons(rows, index, draw));
@@ -420,6 +432,11 @@ export function openUnbundleConfig(node) {
         if (bad.length) {
             return "Still connected: "
                 + bad.map((r) => r.name).join(", ");
+        }
+        const shown = rows.filter((r) => !r.hidden).length;
+        if (shown > MAX_FIELDS) {
+            return `An Unbundle has at most ${MAX_FIELDS} outputs: hide `
+                + `${shown - MAX_FIELDS} more of the fields.`;
         }
         saveLayout(node, {
             ...layoutOf(node),
@@ -478,6 +495,7 @@ export function openBundleConfig(node) {
     const list = el("div", {
         display: "flex", flexDirection: "column", gap: "2px",
         overflowY: "auto", padding: "4px 2px",
+        flex: "1 1 auto", minHeight: "0",      // scrolls in the dialog
     });
     panel.append(list);
 

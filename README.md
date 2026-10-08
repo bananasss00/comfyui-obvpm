@@ -11,6 +11,8 @@ ComfyUI nodes to save time and keep your workflows tidy. Bundle multiple wires i
 - Load Images & Compose: a second output, `extras` (a bundle of the separate images as a list, the selected one, and `images_bundle` with `image_0`, `image_1`, …); layers can be **muted**; a `padding` widget frames the composed image and each separate image; the gap moved into a pill under the Result view; and **presets** keep whole sets of images and settings in your user folder.
 - Value Presets: user presets are kept **one file per preset** (`user/default/obvpm/presets/<preset-type-id>/<name>.json`; older ones move there by themselves), so two browser tabs no longer overwrite each other's presets and presets can be shared as files. **Export…** copies or downloads one preset as that same file; **Import…** opens several at once (and still reads older multi-preset exports).
 - Value Presets: **dropdown filters** -- a new config page, **Filters**, to cut a long dropdown (every model file, say) down to the entries you use: include / exclude patterns per field, saved with your user presets so every node with the same Preset Type Id uses them. Only the dropdown changes; presets and runs still take any entry.
+- Bundle and Unbundle take up to **128** fields (was 16), so a bundle from any Value Presets node fits one Unbundle.
+- Fixed (#18): the Unbundle settings showed only the first 16 fields of a bigger bundle; it now lists all of them, scrolling.
 - Fixed (#21): editing a schema in the table editor (changing a model field's type to `choice`, say) no longer breaks it with a "has no ':'" error when this machine lacks the schema's default file.
 
 ### 0.2.14 (2026-10-05)
@@ -310,7 +312,7 @@ Both nodes also **collapse**: the − button left of the ⚙ folds the node to a
 
 <img src="assets/bundle.gif" title="" alt="Bundle inputs appearing as values are connected and configured" width="787">
 
-Starts with one empty input and names each field after whatever you plug into it, growing a fresh empty input as each one fills, so there is always exactly one spare. Unplug something in the middle and the gap closes. Up to 16 fields.
+Starts with one empty input and names each field after whatever you plug into it, growing a fresh empty input as each one fills, so there is always exactly one spare. Unplug something in the middle and the gap closes. Up to 128 fields.
 
 The name comes from the far end of the wire — what the producing node calls that output. To choose the names yourself, open the config dialog: a rename sticks to the wire it was made on (it is keyed by the derived name, so it survives re-syncs and falls back to the wire's own name if the wire changes).
 
@@ -326,7 +328,7 @@ Wiring something that isn't a bundle into `in` is refused.
 
 Bundles nest: a Bundle's output can itself be a field of another Bundle. Unbundling the outer one puts the inner bundle on the output named after that field, and an Unbundle wired there shows the inner Bundle's fields — the trace follows the wire back through the outer Unbundle to whichever Bundle packed it, at any depth.
 
-The config dialog marks each field with whether the bundle on the wire (or the constant) actually has it: green if it does, red if it does not (that output gives `None`), grey when the source can't be traced, with the reason. It reorders the outputs and hides the ones a branch does not need; hiding is also how you take a single field, or choose which of a larger bundle to expose. A field with connections cannot be hidden — unplug it first. Once a layout is set it also *pins* the outputs: fields added upstream append at the end instead of shifting the existing pins, and a field that disappears upstream while wired keeps its pin (it outputs `None`, with a log line saying so) rather than silently re-meaning everything below it.
+The config dialog marks each field with whether the bundle on the wire (or the constant) actually has it: green if it does, red if it does not (that output gives `None`), grey when the source can't be traced, with the reason. It lists every field the bundle has (scrolling when there are many) and says how many are shown; it reorders the outputs and hides the ones a branch does not need (an Unbundle has up to 128 outputs); hiding is also how you take a single field, or choose which of a larger bundle to expose. A field with connections cannot be hidden — unplug it first. Once a layout is set it also *pins* the outputs: fields added upstream append at the end instead of shifting the existing pins, and a field that disappears upstream while wired keeps its pin (it outputs `None`, with a log line saying so) rather than silently re-meaning everything below it.
 
 ### Set / get by name
 
