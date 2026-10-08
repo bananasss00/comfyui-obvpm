@@ -14,6 +14,7 @@ ComfyUI nodes to save time and keep your workflows tidy. Bundle multiple wires i
 - Bundle and Unbundle take up to **128** fields (was 16), so a bundle from any Value Presets node fits one Unbundle.
 - Fixed (#18): the Unbundle settings showed only the first 16 fields of a bigger bundle; it now lists all of them, scrolling.
 - Value Presets: a preset name wired into `preset` now selects that preset — its saved values run — for batch tests and choosing a preset from elsewhere in the graph (#20). A name known before the run is applied to the node at once.
+- Fixed: reordering a Bundle's fields or an Unbundle's outputs in their settings swapped values between fields or dropped wires on current ComfyUI frontends.
 - Fixed (#21): editing a schema in the table editor (changing a model field's type to `choice`, say) no longer breaks it with a "has no ':'" error when this machine lacks the schema's default file.
 
 ### 0.2.14 (2026-10-05)

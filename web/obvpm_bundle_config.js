@@ -121,13 +121,18 @@ export function applyUnbundleLayout(node) {
     }
     const eff = arrange(traced, layout, linkedOutputNames(node));
 
-    // Snapshot: which link ids ride which FIELD, by the label each slot
-    // wears now (its previous effective name).
+    // Snapshot: where each FIELD's wires go, by the label each slot
+    // wears now (its previous effective name) -- the far ends, not just
+    // the link ids, so a wire can be made again from its new slot.
     const byName = new Map();
-    (node.outputs ?? []).forEach((slot) => {
+    (node.outputs ?? []).forEach((slot, from) => {
         if (!slot.links?.length) return;
         const name = slot.label || slot.localized_name || slot.name;
-        byName.set(name, slot.links.slice());
+        byName.set(name, slot.links.map((id) => {
+            const link = linkById(node.graph, id);
+            return link ? { link, from, to: node.graph?.getNodeById?.(link.target_id),
+                            toSlot: link.target_slot } : null;
+        }).filter(Boolean));
     });
 
     while ((node.outputs?.length ?? 0) < eff.length
@@ -139,11 +144,19 @@ export function applyUnbundleLayout(node) {
         const name = eff[i];
         slot.name = `out_${i + 1}`;
         labelSlot(slot, name ?? `out_${i + 1} (unused)`);
-        const ids = (name && byName.get(name)) || [];
-        slot.links = ids.slice();
-        for (const id of ids) {
-            const link = linkById(node.graph, id);
-            if (link) link.origin_slot = i;
+    });
+    // The wires of a field that moved go with it: made again from its
+    // new slot with the frontend's own connect() (which replaces the
+    // wire into that input). NOT by assigning `slot.links`: the current
+    // frontend keeps links outside the slots, and assigning a slot's
+    // list there disconnects whatever is not in it -- a reorder dropped
+    // the wires of every field it passed over (found with issue #19).
+    // Nothing moves when nothing changed, so a routine sync does nothing.
+    eff.forEach((name, i) => {
+        for (const wire of byName.get(name) ?? []) {
+            if (wire.from === i) continue;
+            if (wire.to) node.connect(i, wire.to, wire.toSlot);
+            else wire.link.origin_slot = i;     // a subgraph's output: retarget
         }
     });
     // Trailing surplus goes AFTER the links have moved onto their new
@@ -480,6 +493,11 @@ export function openBundleConfig(node) {
         const source = originOf(node, slot);
         return {
             slot, index,
+            // the wire's id, kept: on the current frontend a slot's
+            // `link` is DERIVED from the graph's links (the one aimed at
+            // its position), so the slot cannot say which wire it held
+            // once the slots have moved
+            link: slot.link,
             name: slot.label || slot.localized_name || slot.name,
             origin: String(source?.node?.title
                            ?? source?.node?.type ?? "?"),
@@ -524,18 +542,36 @@ export function openBundleConfig(node) {
         if (new Set(names).size !== names.length) {
             return "Names must be unique.";
         }
-        // Physical reorder IS the store: node.inputs (with its links) is
+        // The wires ARE the store: node.inputs (with its links) is
         // serialized in the workflow, and the server packs in_i as line
-        // i -- so splicing the occupied slots into the chosen order and
-        // renumbering persists by itself. Only renames need properties.
-        const chosen = rows.map((r) => r.slot);
+        // i -- so putting each row's wire on its new position persists by
+        // itself. Only renames need properties.
+        //
+        // By RECONNECTING, not by moving slot objects around: the current
+        // frontend keeps a slot's link outside the slot (input.link is
+        // derived, and assigning it is ignored), so shuffling the slots
+        // renamed the fields over wires that stayed put -- a field took
+        // another field's value (found with issue #19). disconnectInput /
+        // connect is the frontend's own way, on every version. The sync
+        // that closes gaps runs on a timeout, after all of this.
         const positions = occupied.map((x) => x.index);
-        positions.forEach((inputIndex, i) => {
-            node.inputs[inputIndex] = chosen[i];
+        const sources = rows.map((row) => {
+            const link = linkById(node.graph, row.link);
+            const from = link ? node.graph.getNodeById(link.origin_id) : null;
+            return from ? { from, slot: link.origin_slot } : null;
         });
-        (node.inputs ?? []).filter((s) => re.test(s.name))
-            .forEach((slot, i) => { slot.name = `in_${i + 1}`; });
-        repointLinks(node);
+        const moved = rows.some((row, i) => row.index !== positions[i]);
+        if (moved && sources.some((src) => !src)) {
+            return "These fields cannot be reordered here: a wire comes from "
+                + "outside this graph (a subgraph's input). Rename them, or "
+                + "reorder the wires by hand.";
+        }
+        if (moved) {
+            positions.forEach((at) => node.disconnectInput(at));
+            rows.forEach((row, i) => {
+                sources[i].from.connect(sources[i].slot, node, positions[i]);
+            });
+        }
         // Renames keyed by what the wire DERIVES, so they survive the
         // sync re-deriving names -- and degrade to the derived name if
         // the wire changes. Written before resync so the very next sync
