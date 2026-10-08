@@ -2,6 +2,10 @@
 
 Changes not yet in a release are listed under **Latest HEAD**; they become a numbered version when the pack is released.
 
+## Latest HEAD
+
+- Value Presets: **export and import single presets**, to share them. **Export…** opens on your user presets when there are any (they are what you share; workflow presets otherwise) and lists the presets of what it exports (user presets, workflow presets or both) with a tick each and an **all** tick above them; the text and the file hold only the ticked ones, and a file of one preset is named after it (`night_rain.presets.json`). **Import…** lists the presets of the file or text it is given the same way, marking those whose name is already there, and imports only the ticked ones. Copy, Download and Import wait while nothing is ticked. The **include the schema** option is gone: an import never used the fields a file carried (presets are matched to the node's own fields by name), so they only made the file larger. The file format is otherwise unchanged: files exported before import as they did.
+
 ## 0.2.14 (2026-10-05)
 
 - Bundle and Unbundle settings: **Enter** is OK -- from a name field too (a name that is not allowed still keeps the dialog open with the reason). Not on a focused button (Enter presses that one) or a dropdown.

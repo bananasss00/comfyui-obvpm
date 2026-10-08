@@ -164,15 +164,16 @@ export async function saveUserPresets(name, presets) {
 // export / import
 // ---------------------------------------------------------------------
 
-/** The export file's text. */
-export function exportText({ typeId, schema, presets }) {
+/** The export file's text. The fields are not in it: an import matches
+ *  presets to the node's own fields by name. */
+export function exportText({ typeId, presets }) {
     const body = { format: FORMAT, version: 1, presets: presetsFrom(presets) };
     if (typeId) body.type_id = typeId;
-    if (schema) body.schema = String(schema);
     return JSON.stringify(body, null, 1);
 }
 
-/** An export file's presets (and schema, if it carries one), or an error. */
+/** An export file's presets, or an error. (A `schema` an older export
+ *  carries is ignored, as it always was.) */
 export function parseImport(text) {
     const raw = String(text ?? "").trim();
     if (!raw) return { error: "Nothing to import." };
@@ -191,8 +192,26 @@ export function parseImport(text) {
     return {
         presets,
         typeId: typeof data?.type_id === "string" ? data.type_id : "",
-        schema: typeof data?.schema === "string" ? data.schema : "",
     };
+}
+
+/** The presets of `presets` named in `names`, in that order: an export or
+ *  an import of only some of them (one preset, to share it). */
+export function pickPresets(presets, names) {
+    const out = Object.create(null);
+    for (const name of names) {
+        if (Object.prototype.hasOwnProperty.call(presets, name)) out[name] = presets[name];
+    }
+    return out;
+}
+
+/** The name an export downloads as: the preset's own when it is the only
+ *  one, else `fallback` (the Preset Type Id or the node's title). */
+export function exportFileName(names, fallback) {
+    const base = names.length === 1 ? names[0] : fallback;
+    const safe = String(base ?? "").replace(/[^A-Za-z0-9._-]+/g, "_")
+        .replace(/^[._]+|[._]+$/g, "");
+    return (safe || "presets") + ".presets.json";
 }
 
 /** Merge `incoming` into `into`: replace or keep both (renamed "name 2"). */

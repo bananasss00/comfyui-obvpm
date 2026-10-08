@@ -13,7 +13,7 @@ import { trace, listenForPageErrors, loadStarted, loadFinished,
 import { STAR, typeIdOf, cleanTypeId, isUserLabel, bareName,
          userPresets, userPresetsError, loadUserPresets, saveUserPresets,
          onUserPresetsChange, exportText, parseImport, mergePresets,
-         download } from "./value_presets_user.js";
+         pickPresets, exportFileName, download } from "./value_presets_user.js";
 import { constantOn, setMode } from "./obvpm_constants.js";
 import { restoreRows, restoreWrites } from "./value_presets_restore.js";
 
@@ -1576,6 +1576,49 @@ function checkRow(label, checked, onChange, note) {
     return row;
 }
 
+/** A dialog button that does nothing while there is nothing to act on. */
+function enable(button, on) {
+    button.disabled = !on;
+    button.style.opacity = on ? "" : "0.45";
+    button.style.cursor = on ? "pointer" : "default";
+}
+
+/**
+ * Which presets an export or import takes: a tick per preset name, ticks
+ * kept in `chosen`, with an "all" row above when there is more than one.
+ * `note(name)` may add a dim note to a row; `onChange()` follows each tick.
+ */
+function pickList(names, chosen, onChange, note = () => "") {
+    const list = el("div", { display: "flex", flexDirection: "column", gap: "3px",
+                             maxHeight: "180px", overflowY: "auto" });
+    const boxes = new Map();
+    let all = null;
+    const paintAll = () => {
+        if (all) all.checked = chosen.size === names.length;
+    };
+    if (names.length > 1) {
+        const row = checkRow(`all ${names.length}`, chosen.size === names.length, (on) => {
+            chosen.clear();
+            if (on) for (const n of names) chosen.add(n);
+            for (const [n, box] of boxes) box.checked = chosen.has(n);
+            onChange();
+        });
+        row.style.fontWeight = "600";
+        all = row.querySelector("input");
+        list.append(row);
+    }
+    for (const name of names) {
+        const row = checkRow(name, chosen.has(name), (on) => {
+            if (on) chosen.add(name); else chosen.delete(name);
+            paintAll();
+            onChange();
+        }, note(name));
+        boxes.set(name, row.querySelector("input"));
+        list.append(row);
+    }
+    return list;
+}
+
 function radioRow(name, options, value, onChange) {
     const row = el("div", { display: "flex", gap: "14px", flexWrap: "wrap" });
     for (const opt of options) {
@@ -1726,47 +1769,72 @@ function presetsPane(node, overlay, say) {
     const exportBtn = pushButton("Export…", () => popOver(overlay, "Export presets",
         "min(700px, 92vw)", (box, close) => {
             const lib = cleanTypeId(typeId);
-            let what = "workflow";
-            let withSchema = false;
+            // the user's own presets are what they share: first, and
+            // picked, whenever there are any
+            const hasUser = !!lib && Object.keys(userPresets(lib)).length > 0;
+            let what = hasUser ? "user" : "workflow";
+            // the presets of the source picked, and which of them go out:
+            // all at first, or only one to share it
+            let source = Object.create(null);
+            let names = [];
+            const chosen = new Set();
             const area = textArea("");
+            const picks = el("div");
+            const empty = hint("");
+            const picked = () => names.filter((n) => chosen.has(n));
+            const copyBtn = pushButton("Copy", async () => {
+                try {
+                    await navigator.clipboard.writeText(area.value);
+                    say(picked().length === 1 ? `Copied the preset '${picked()[0]}'.`
+                                              : "Copied the presets.");
+                } catch (err) {
+                    area.select();
+                    say("Select the text and copy it (the clipboard is not available here).");
+                }
+            });
+            const downloadBtn = pushButton("Download", () => {
+                download(exportFileName(picked(), lib || node.title), area.value);
+            }, { fontWeight: "600" });
             const paint = () => {
-                const presets = Object.create(null);
-                if (what !== "user") Object.assign(presets, readJson(node, PRESETS));
-                if (what !== "workflow" && lib) Object.assign(presets, userPresets(lib));
-                area.value = exportText({
-                    typeId: lib, presets,
-                    schema: withSchema ? widget(node, SCHEMA)?.value : "",
-                });
+                const list = picked();
+                area.value = list.length ? exportText({
+                    typeId: lib, presets: pickPresets(source, list),
+                }) : "";
+                enable(copyBtn, list.length > 0);
+                enable(downloadBtn, list.length > 0);
+            };
+            const fill = () => {
+                source = Object.create(null);
+                if (what !== "user") Object.assign(source, readJson(node, PRESETS));
+                if (what !== "workflow" && lib) Object.assign(source, userPresets(lib));
+                names = Object.keys(source).sort((a, b) => a.localeCompare(b));
+                chosen.clear();
+                for (const n of names) chosen.add(n);
+                picks.replaceChildren(pickList(names, chosen, paint));
+                empty.textContent = names.length ? "" : "There are no presets here to export.";
+                empty.style.display = names.length ? "none" : "";
+                paint();
             };
             box.append(
-                radioRow("obvpm-export-what", [
+                radioRow("obvpm-export-what", hasUser ? [
+                    { label: "user presets", value: "user" },
+                    { label: "workflow presets", value: "workflow" },
+                    { label: "both", value: "both" },
+                ] : [
                     { label: "workflow presets", value: "workflow" },
                     ...(lib ? [{ label: "user presets", value: "user" },
                                { label: "both", value: "both" }] : []),
-                ], what, (v) => { what = v; paint(); }),
-                checkRow("include the schema (the fields)", false,
-                         (on) => { withSchema = on; paint(); }),
+                ], what, (v) => { what = v; fill(); }),
+                picks, empty,
                 area,
-                hint("Send this text or the file to someone: they import it on "
-                     + "their Value Presets node (config → Presets → Import)."));
+                hint("Untick what you do not want to send -- one ticked preset "
+                     + "makes a file of just that preset. Send this text or the "
+                     + "file to someone: they import it on their Value Presets "
+                     + "node (config → Presets → Import)."));
             const row = el("div", { display: "flex", gap: "6px", justifyContent: "flex-end" });
-            row.append(
-                pushButton("Close", close),
-                pushButton("Copy", async () => {
-                    try {
-                        await navigator.clipboard.writeText(area.value);
-                        say("Copied the presets.");
-                    } catch (err) {
-                        area.select();
-                        say("Select the text and copy it (the clipboard is not available here).");
-                    }
-                }),
-                pushButton("Download", () => {
-                    const base = (lib || node.title || "presets").replace(/[^A-Za-z0-9._-]+/g, "_");
-                    download(base + ".presets.json", area.value);
-                }, { fontWeight: "600" }));
+            row.append(pushButton("Close", close), copyBtn, downloadBtn);
             box.append(row);
-            paint();
+            fill();
         }));
     const importBtn = pushButton("Import…", () => popOver(overlay, "Import presets",
         "min(700px, 92vw)", (box, close) => {
@@ -1775,6 +1843,60 @@ function presetsPane(node, overlay, say) {
             let mode = "keep";
             const area = textArea("", "180px");
             area.placeholder = "Paste an exported presets file here, or open one.";
+            const status = el("div", { color: "#e88", whiteSpace: "pre-wrap" });
+            // what the text holds, and which of its presets come in: all
+            // at first, or only the one wanted from a shared file
+            let got = null;
+            let names = [];
+            const chosen = new Set();
+            const picks = el("div");
+            const target = () => (into === "user" && lib ? userPresets(lib)
+                                                        : readJson(node, PRESETS));
+            const importBtn = pushButton("Import", async () => {
+                if (!got || !chosen.size) return;
+                const incoming = pickPresets(got.presets, names.filter((n) => chosen.has(n)));
+                try {
+                    if (into === "user" && lib) {
+                        const merged = mergePresets(userPresets(lib), incoming, mode);
+                        await saveUserPresets(lib, merged.presets);
+                        say(`Imported ${merged.added.length} preset(s) into your user presets ('${lib}').`);
+                    } else {
+                        const merged = mergePresets(readJson(node, PRESETS), incoming, mode);
+                        writeWorkflowPresets(node, merged.presets);
+                        say(`Imported ${merged.added.length} preset(s) into the workflow presets.`);
+                        void rebuild(node, true);
+                    }
+                } catch (err) {
+                    status.textContent = "Could not import: " + String(err?.message ?? err);
+                    return;
+                }
+                close();
+            }, { fontWeight: "600" });
+            const paintPicks = () => {
+                const there = target();
+                picks.replaceChildren(names.length ? pickList(names, chosen,
+                    () => enable(importBtn, chosen.size > 0),
+                    (n) => (Object.prototype.hasOwnProperty.call(there, n)
+                        ? "already there" : "")) : "");
+                enable(importBtn, chosen.size > 0);
+            };
+            const read = () => {
+                got = null;
+                names = [];
+                chosen.clear();
+                status.textContent = "";
+                if (area.value.trim()) {
+                    const r = parseImport(area.value);
+                    if (r.error) status.textContent = r.error;
+                    else got = r;
+                }
+                if (got) {
+                    names = Object.keys(got.presets).sort((a, b) => a.localeCompare(b));
+                    for (const n of names) chosen.add(n);
+                }
+                paintPicks();
+            };
+            area.addEventListener("input", read);
             const file = el("input");
             file.type = "file";
             file.accept = ".json,application/json";
@@ -1783,54 +1905,36 @@ function presetsPane(node, overlay, say) {
                 if (!f) return;
                 if (f.size > 1024 * 1024) { status.textContent = "That file is larger than 1 MB."; return; }
                 area.value = await f.text();
+                read();
             });
-            const status = el("div", { color: "#e88", whiteSpace: "pre-wrap" });
             box.append(
-                area, file,
+                area, file, picks,
                 el("div", {}, "Into:"),
                 radioRow("obvpm-import-into", [
                     { label: "workflow presets", value: "workflow" },
                     ...(lib ? [{ label: "user presets ('" + lib + "')", value: "user" }] : []),
-                ], into, (v) => { into = v; }),
+                ], into, (v) => { into = v; paintPicks(); }),
                 el("div", {}, "A preset with a name that is already there:"),
                 radioRow("obvpm-import-mode", [
                     { label: "keep both (the new one is renamed)", value: "keep" },
                     { label: "replace it", value: "replace" },
                 ], mode, (v) => { mode = v; }),
-                hint("Imported at once. Presets are matched to fields by name: a "
-                     + "field this node lacks is ignored, one the preset lacks "
-                     + "takes its default."),
+                hint("Only the ticked presets are imported, at once. Presets are "
+                     + "matched to fields by name: a field this node lacks is "
+                     + "ignored, one the preset lacks takes its default."),
                 status);
             const row = el("div", { display: "flex", gap: "6px", justifyContent: "flex-end" });
-            row.append(
-                pushButton("Cancel", close),
-                pushButton("Import", async () => {
-                    const got = parseImport(area.value);
-                    if (got.error) { status.textContent = got.error; return; }
-                    try {
-                        if (into === "user" && lib) {
-                            const merged = mergePresets(userPresets(lib), got.presets, mode);
-                            await saveUserPresets(lib, merged.presets);
-                            say(`Imported ${merged.added.length} preset(s) into your user presets ('${lib}').`);
-                        } else {
-                            const merged = mergePresets(readJson(node, PRESETS), got.presets, mode);
-                            writeWorkflowPresets(node, merged.presets);
-                            say(`Imported ${merged.added.length} preset(s) into the workflow presets.`);
-                            void rebuild(node, true);
-                        }
-                    } catch (err) {
-                        status.textContent = "Could not import: " + String(err?.message ?? err);
-                        return;
-                    }
-                    close();
-                }, { fontWeight: "600" }));
+            row.append(pushButton("Cancel", close), importBtn);
             box.append(row);
+            read();
         }));
     const buttons = el("div", { display: "flex", gap: "6px" });
     buttons.append(exportBtn, importBtn);
     pane.append(section("Export / import",
         hint("Move presets between workflows or share them: export copies or "
-             + "downloads them as a small file; import takes one in."),
+             + "downloads them as a small file -- all of them, or only the "
+             + "ones you tick, such as one preset to share; import takes one "
+             + "in, all of it or the presets you tick."),
         buttons));
 
     return {

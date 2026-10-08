@@ -6,6 +6,10 @@ ComfyUI nodes to save time and keep your workflows tidy. Bundle multiple wires i
 
 **Also check out my new Timeline node:**  https://github.com/chanon/comfyui-obvpm-timeline It not only lets you extend videos seamlessly, but also **prepend, bridge and even create seamless loops with motion context**!
 
+### Latest HEAD
+
+- Value Presets: export and import single presets, to share them -- each preset has a tick in **Export…**, which opens on your user presets when there are any (one ticked preset downloads as a file named after it) and in **Import…** (only the ticked presets of a file come in).
+
 ### 0.2.14 (2026-10-05)
 
 - Bundle and Unbundle settings: Enter is OK.
@@ -255,7 +259,7 @@ steps: int 1..200 = 20
 
 **Shared workflow presets.** Nodes in a workflow with the same Preset Type Id also share their *workflow* presets: saving, renaming, deleting or importing one on any of them changes the list on all of them (each node still has its own selection and its own hidden presets). When a node joins — its id is set to one other nodes already use, or it is pasted in — the lists are merged: a preset the group already has under the same name with different values keeps the name, and the joining node's becomes "name 2" (its selection follows, so nothing it runs changes). If the lists ever differ (edited by an older version), the Presets page says so and offers **Sync from this node**; loading a workflow never changes them.
 
-**Export / import.** Also on the Presets page: **Export…** copies or downloads presets as a small JSON file (workflow presets, user presets, or both, optionally with the schema); **Import…** takes one in — pasted or opened — into the workflow presets or the user presets, keeping both or replacing on a name clash. Presets are matched to fields by name, so they import into a node whose schema differs: a field it lacks is ignored, one the preset lacks takes its default.
+**Export / import.** Also on the Presets page: **Export…** copies or downloads presets as a small JSON file (workflow presets, user presets, or both), with a tick per preset: untick the rest to share a single preset, as a file named after it; **Import…** takes one in — pasted or opened — lists the presets it holds (marking those whose name is already there) and takes the ones ticked, into the workflow presets or the user presets, keeping both or replacing on a name clash. Presets are matched to fields by name, so they import into a node whose schema differs: a field it lacks is ignored, one the preset lacks takes its default.
 
 **Set to constant.** On the config **Set** page, turn on *set this bundle to a constant*: the node gets a **set_constant** field, its last one above the buttons (named after the node's title to start with), and an Unbundle with *get* or a KJNodes Get reads this node's bundle by that name, without a wire, the same as a Bundle's *set*. Set or change the name in that field; getters follow a rename. The node keeps its title.
 
