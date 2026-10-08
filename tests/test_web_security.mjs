@@ -7,6 +7,13 @@ import test from "node:test";
 
 const root = new URL("../web/", import.meta.url);
 const tick = () => new Promise(resolve => setImmediate(resolve));
+// a DOM element as far as the editors touch one in these tests
+function fakeElement() {
+    return { style: {}, dataset: {}, hidden: false, title: "", children: [],
+             append(...c) { this.children.push(...c); }, appendChild(c) { this.children.push(c); },
+             addEventListener() {}, classList: { add() {}, remove() {} } };
+}
+
 async function harness() {
     const extensions = [];
     const alerts = [];
@@ -20,7 +27,8 @@ async function harness() {
     } };
     const context = vm.createContext({ console, TextEncoder, AbortController, Blob, URL, FormData,
         setTimeout, clearTimeout, alert: msg => alerts.push(msg),
-        document: { getElementById: () => style, addEventListener() {}, body: {} },
+        document: { getElementById: () => style, addEventListener() {}, body: {},
+                    createElement: () => fakeElement() },
         window: { addEventListener() {}, removeEventListener() {} }, LiteGraph: {}, Image: class {} });
     const cache = new Map();
     const mock = values => new vm.SyntheticModule(Object.keys(values), function () {
@@ -33,7 +41,8 @@ async function harness() {
         if (name.endsWith("scripts/app.js")) mod = mock({ app });
         else if (name.endsWith("scripts/api.js")) mod = mock({ api });
         else if (name === "obvpm_ui.js") mod = mock({ themePalette: () => ({}), el: noop, icon: noop, iconButton: noop,
-            ...Object.fromEntries(["TEXT", "TITLE", "INK", "DIM", "EDGE", "FILL", "PANEL", "textBox", "pushButton", "openOverlay", "dropWidgetSockets", "addPanelWidget", "valueTooltip", "legacyCanvasBox", "askText", "askConfirm", "askChoice", "askTextChoice", "notice", "NODE_BUTTON", "NODE_BUTTON_HOVER", "nodeButton", "nodeButtonBar", "paintNodeButton"].map(k => [k, noop])),
+            ...Object.fromEntries(["TEXT", "TITLE", "INK", "DIM", "EDGE", "FILL", "PANEL", "textBox", "pushButton", "openOverlay", "dropWidgetSockets", "addPanelWidget", "valueTooltip", "legacyCanvasBox", "askText", "askConfirm", "askChoice", "askTextChoice", "notice", "NODE_BUTTON", "NODE_BUTTON_HOVER", "paintNodeButton"].map(k => [k, noop])),
+            nodeButton: () => fakeElement(), nodeButtonBar: () => fakeElement(),
             legacyCanvasBox: (ctx, w, h) => [w, h] });
         else if (name === "obvpm_artius.js") mod = mock({ ARTIUS_MIME: "test/artius", ARTIUS_ROUTE_BASE: "/artius", artiusRelativePath: () => null, readArtiusAssets: () => null });
         else if (name === "obvpm_bundle_config.js") mod = mock(Object.fromEntries(["addConfigButton", "applyUnbundleLayout", "hasUnbundleLayout", "openBundleConfig", "openUnbundleConfig"].map(k => [k, noop])));
@@ -43,7 +52,7 @@ async function harness() {
             if (name === "obvpm_dynamic.js") source += "\nexport { refreshCompactCss, COMPACT_NODES, FOLD_NODES };";
             if (name === "value_presets.js") source += `
 export { applyPreset, savePreset, readJson, renameKeys, carryRenames };`;
-            if (name === "compose_images.js") source += "\nexport { thumbs, planLayout };";
+            if (name === "compose_images.js") source += "\nexport { thumbs, planLayout, padPlan };";
             mod = new vm.SourceTextModule(source, { context, identifier: name });
         }
         cache.set(name, mod);
@@ -108,6 +117,11 @@ test("actual Compose editor refuses oversized persisted data without overwriting
         constructor(value) { this.widgets = [{ name: "layers", value }]; this.inputs = []; this.size = [400, 300]; }
         addWidget(type, name, value, callback, options) { const w = { type, name, value, callback, options }; this.widgets.push(w); return w; }
         addCustomWidget(w) { this.widgets.push(w); return w; }
+        addDOMWidget(name, type, element, options) {
+            const w = { name, type, element, options: options ?? {} };
+            this.widgets.push(w);
+            return w;
+        }
         setDirtyCanvas() {}
     }
     await h.extensions.find(e => e.name === "obvpm.compose_images").beforeRegisterNodeDef(Node, { name: "LoadImagesCompose (obvpm)" });
@@ -205,4 +219,25 @@ test("actual preset apply/save/read/rename retain prototype-like names", async (
         assert.deepEqual(JSON.parse(value("values").value), expected);
     }
     assert.equal(h.requests.length, 0);
+});
+
+test("the editor pads a plan exactly as compose_layout.pad_plan does", async () => {
+    const h = await harness();
+    const compose = await h.module("compose_images.js");
+    // generated from compose_layout.pad_plan(plan(...), pad) -- never by hand
+    const cases = [
+        { sizes: [[640, 480], [300, 300], [1024, 256]], mp: 1.0, gap: 0, pad: 5, width: 1040, height: 752,
+          boxes: [[8, 8, 640, 480], [648, 8, 300, 300], [8, 488, 1024, 256]] },
+        { sizes: [[200, 100]], mp: 0, gap: 4, pad: 12, width: 240, height: 144, boxes: [[20, 22, 200, 100]] },
+        { sizes: [[620, 620], [620, 620], [400, 800]], mp: 2.0, gap: 8, pad: 33, width: 1120, height: 1328,
+          boxes: [[46, 40, 620, 620], [46, 668, 620, 620], [674, 40, 400, 800]] },
+    ];
+    for (const c of cases) {
+        const plan = compose.padPlan(compose.planLayout(c.sizes, c.mp, "auto", c.gap, 16, "natural"), c.pad, 16);
+        assert.equal(plan.width, c.width);
+        assert.equal(plan.height, c.height);
+        assert.deepEqual(JSON.parse(JSON.stringify(plan.boxes)), c.boxes);
+    }
+    const plain = compose.planLayout([[64, 64]], 0, "auto", 0, 16, "natural");
+    assert.equal(compose.padPlan(plain, 0, 16), plain);
 });

@@ -9,7 +9,11 @@ import { ASPECT_CHOICES, parseAspect, impliedAspectRect, ratioDragRect,
 // button and should read as one.
 // notice, not window.alert: Electron (ComfyUI Desktop) is unreliable
 // with native dialogs -- see obvpm_ui.js
-import { themePalette, notice, legacyCanvasBox } from "./obvpm_ui.js";
+import { themePalette, notice, legacyCanvasBox, dropWidgetSockets, nodeButton,
+         nodeButtonBar, NODE_BUTTON_HOVER, askText, askConfirm } from "./obvpm_ui.js";
+import { SETTINGS as PRESET_SETTINGS, cleanName, composePresets,
+         composePresetsError, loadComposePresets, savePresetFile,
+         deletePresetFile, onComposePresetsChange } from "./compose_presets.js";
 import { api } from "../../scripts/api.js";
 // The Artius browser's payload shape is decoded in ONE place for the
 // whole pack.
@@ -464,6 +468,24 @@ function planFill(aspects, budget, target, gap, align) {
              fill: covered / (width * height), order: "given" };
 }
 
+// The plan with `padding` pixels of background all round the sheet --
+// compose_layout.pad_plan, line for line: added after planning (the cap
+// is the layers' budget), the canvas aligned up again and the extra split
+// evenly, so every side keeps at least the padding.
+function padPlan(plan, padding, align) {
+    if (!plan) return null;
+    const pad = Math.max(0, Math.floor(Number(padding) || 0));
+    if (!pad) return plan;
+    align = align || ALIGN;
+    const width = alignUp(plan.width + 2 * pad, align);
+    const height = alignUp(plan.height + 2 * pad, align);
+    const ox = Math.floor((width - plan.width) / 2);
+    const oy = Math.floor((height - plan.height) / 2);
+    const boxes = plan.boxes.map(([x, y, w, h]) => [x + ox, y + oy, w, h]);
+    const covered = boxes.reduce((a, b) => a + b[2] * b[3], 0);
+    return { ...plan, width, height, boxes, fill: covered / (width * height) };
+}
+
 function planLayout(sizes, maxMegapixels, targetAspect, gap, align, sizing) {
     const pairs = [];
     for (const item of sizes || []) {
@@ -805,6 +827,19 @@ app.registerExtension({
                 });
             }
 
+            // gap is set from the Result view's own row now, and selected
+            // by clicking in the list: both still values the node runs
+            // with (saved, sent), just not widgets on its face
+            const gapWidget = node.widgets.find((w) => w.name === "gap");
+            const selectedWidget = node.widgets.find((w) => w.name === "selected");
+            for (const w of [gapWidget, selectedWidget]) {
+                if (!w) continue;
+                w.hidden = true;
+                w.options = w.options || {};
+                w.options.hidden = true;
+            }
+            dropWidgetSockets(node, ["gap", "selected"]);
+
             const isVueMode = () =>
                 typeof LiteGraph !== "undefined" && !!LiteGraph.vueNodesMode;
             const ui = () =>
@@ -838,6 +873,10 @@ app.registerExtension({
                 // the `layers` value this node last read or wrote itself;
                 // anything else found there was set from OUTSIDE
                 seen: undefined,
+                // the same for `selected`
+                selSeen: undefined,
+                // the presets row exists (repaint marks it from then on)
+                presetsReady: false,
             };
 
             function readLayers() {
@@ -862,10 +901,32 @@ app.registerExtension({
             // (and on the next edit wrote back) its old, often empty list.
             // Re-read whenever the value is not the one this node last saw.
             function followValue() {
-                if (state.removed || layersWidget.value === state.seen) return;
-                readLayers();
-                state.planKey = "";
-                repaint();
+                if (state.removed) return;
+                let changed = false;
+                // the layers first: a selection is checked against them
+                if (layersWidget.value !== state.seen) {
+                    readLayers();
+                    state.planKey = "";
+                    changed = true;
+                }
+                if (selectedWidget && selectedWidget.value !== state.selSeen) {
+                    const v = Math.floor(Number(selectedWidget.value));
+                    state.selSeen = selectedWidget.value;
+                    state.sel = Number.isFinite(v) && v >= 0 && v < state.layers.length
+                        ? v : -1;
+                    changed = true;
+                }
+                if (changed) repaint();
+            }
+
+            // What is selected is what extras' selected_image is: the
+            // run reads it from the hidden `selected` widget.
+            function syncSelected() {
+                if (!selectedWidget || state.removed) return;
+                const v = state.sel >= 0 && state.sel < state.layers.length
+                    ? state.sel : -1;
+                if (selectedWidget.value !== v) selectedWidget.value = v;
+                state.selSeen = selectedWidget.value;
             }
             const prevLayersCallback = layersWidget.callback;
             layersWidget.callback = function () {
@@ -887,6 +948,7 @@ app.registerExtension({
                         };
                     }
                     if (layer.aspect) out.aspect = layer.aspect;
+                    if (layer.muted) out.muted = true;
                     return out;
                 }));
                 try { parseLayers(value); }
@@ -898,6 +960,8 @@ app.registerExtension({
             }
 
             function repaint() {
+                syncSelected();
+                if (state.presetsReady) markPresetChanges();
                 node.setDirtyCanvas(true, true);
                 editorWidget?.triggerDraw?.();
             }
@@ -914,7 +978,7 @@ app.registerExtension({
                 if (!canAdd(1)) return false;
                 try { parseLayers(JSON.stringify([...state.layers, { image: path }])); }
                 catch (err) { void notice(err.message); return false; }
-                state.layers.push({ image: path, crop: null, aspect: null });
+                state.layers.push({ image: path, crop: null, aspect: null, muted: false });
                 state.sel = state.layers.length - 1;
                 state.reveal = state.sel;
                 thumbFor(path, repaint);
@@ -1000,6 +1064,230 @@ app.registerExtension({
                 fileInput.click();
             }
 
+            /* --- presets: the whole set, kept in the user folder ---- */
+
+            const NO_PRESET = "(no preset)";
+            const presetName = () => String(node.properties?.obvpm_compose_preset ?? "");
+            function setPresetName(name) {
+                node.properties = node.properties || {};
+                if (name) node.properties.obvpm_compose_preset = name;
+                else delete node.properties.obvpm_compose_preset;
+                presetWidget.value = name || NO_PRESET;
+                presetChanged = null;          // re-mark against the new name
+                repaint();
+            }
+            // what a preset holds: the layers and the sheet settings
+            function snapshot() {
+                const out = { layers: JSON.parse(layersWidget.value || "[]") };
+                for (const key of PRESET_SETTINGS) {
+                    const v = widgetValue(key, undefined);
+                    if (v !== undefined) out[key] = v;
+                }
+                return out;
+            }
+            function applyPreset(name) {
+                const preset = composePresets()[name];
+                if (!preset) {
+                    void notice(`There is no compose preset '${name}' (deleted elsewhere?).`);
+                    setPresetName("");
+                    return;
+                }
+                for (const key of PRESET_SETTINGS) {
+                    const w = node.widgets.find((x) => x.name === key);
+                    if (!w || preset[key] === undefined) continue;
+                    w.value = preset[key];
+                    w.callback?.(w.value);
+                }
+                layersWidget.value = JSON.stringify(preset.layers);
+                state.sel = -1;
+                followValue();
+                setPresetName(name);
+            }
+            const presetWidget = node.addWidget(
+                "combo", "preset", presetName() || NO_PRESET,
+                (value) => {
+                    if (!value || value === NO_PRESET) setPresetName("");
+                    else applyPreset(value);
+                },
+                {
+                    values: () => {
+                        void loadComposePresets();
+                        return [NO_PRESET].concat(Object.keys(composePresets())
+                            .sort((a, b) => a.localeCompare(b)));
+                    },
+                });
+            presetWidget.serialize = false;
+            presetWidget.options = presetWidget.options || {};
+            presetWidget.options.serialize = false;
+            const PRESET_TIP = "Saved sets of images and settings, one file each "
+                + "in your user folder (user/default/obvpm/compose_presets/): pick one "
+                + "to load it. Shared by every Load Images & Compose node.";
+            presetWidget.tooltip = PRESET_TIP;
+
+            async function savePresetAs() {
+                const typed = await askText("Save these images and settings as a preset:", {
+                    value: presetName(), placeholder: "preset name", ok: "Save",
+                });
+                if (typed == null) return;
+                const name = cleanName(typed);
+                if (!name) {
+                    void notice("A preset name is its file name: 1 to 64 characters, "
+                                + "none of < > : \" / \\ | ? *, and not ending in a dot "
+                                + "or a space.");
+                    return;
+                }
+                await loadComposePresets();
+                if (composePresets()[name] && name !== presetName()
+                        && !await askConfirm(`Replace the preset '${name}'?`, { ok: "Replace" })) {
+                    return;
+                }
+                await storePreset(name);
+            }
+            async function storePreset(name) {
+                try {
+                    await savePresetFile(name, snapshot());
+                    setPresetName(name);
+                } catch (err) {
+                    void notice("Could not save the preset: " + String(err?.message ?? err));
+                }
+            }
+            async function deletePreset() {
+                const name = presetName();
+                if (!name || !await askConfirm(
+                    `Delete the preset '${name}'? The images and settings stay on this node.`,
+                    { ok: "Delete" })) return;
+                try {
+                    await deletePresetFile(name);
+                    setPresetName("");
+                } catch (err) {
+                    void notice("Could not delete the preset: " + String(err?.message ?? err));
+                }
+            }
+
+            // save as / save / revert / delete, Value Presets' row and look
+            const presetButtons = {
+                saveAs: nodeButton("save as", () => void savePresetAs(),
+                    { tip: "Keep these images and settings as a new preset in your user folder." }),
+                save: nodeButton("save", () => void storePreset(presetName()),
+                    { tip: "Overwrite the chosen preset with these images and settings." }),
+                // the preset again, as it was saved: what "modified" says
+                // moved goes back (Value Presets' revert, no question asked)
+                revert: nodeButton("revert", () => applyPreset(presetName()),
+                    { tip: "Put back the chosen preset's images and settings." }),
+                del: nodeButton("delete", () => void deletePreset(),
+                    { tip: "Remove the chosen preset from your user folder." }),
+            };
+            presetButtons.del.style.marginLeft = "auto";
+            const presetBar = nodeButtonBar(Object.values(presetButtons));
+            const presetRow = document.createElement("div");
+            Object.assign(presetRow.style, {
+                display: "flex", flexDirection: "column", justifyContent: "flex-start",
+                boxSizing: "border-box", overflow: "hidden",
+            });
+            presetRow.append(presetBar);
+            // margin 0: a DOM widget's default 10 px is taken off EVERY
+            // side in classic, which left the 24 px buttons an 8 px box
+            // (clipped) inside a row padded far apart from its neighbours
+            const presetRowWidget = node.addDOMWidget(
+                "compose_presets", "div", presetRow, { hideOnZoom: false, margin: 0 });
+            presetRowWidget.serialize = false;
+            presetRowWidget.options.serialize = false;
+            // Classic: the buttons' 24 px plus the 4 px every canvas widget
+            // leaves under itself. Nodes 2.0: NO layout size at all -- a
+            // widget that has one gets a stretchable grid row there, and
+            // on a node taller than its content this row took a share of
+            // the spare height as empty space under the buttons (24 px ->
+            // 150 px, measured); without one the row is the buttons' own
+            // height and the grid spaces it like its other rows.
+            const classicRowSize = () => ({ minHeight: 28, maxHeight: 28, minWidth: 0 });
+            Object.defineProperty(presetRowWidget, "computeLayoutSize", {
+                configurable: true,
+                get: () => (isVueMode() ? undefined : classicRowSize),
+                set: () => {},
+            });
+            Object.defineProperty(presetRowWidget, "width", {
+                configurable: true, get: () => undefined, set: () => {},
+            });
+            dropWidgetSockets(node, ["compose_presets"]);
+            // A layer list as compared: the same fields in the same order
+            // and the crop at the precision it is saved with, so a list
+            // that merely went through a save and a load reads unchanged.
+            function layersKey(list) {
+                const r4 = (v) => +Number(v).toFixed(4);
+                return JSON.stringify((list ?? []).map((l) => [
+                    l.image,
+                    l.crop ? [r4(l.crop.x), r4(l.crop.y), r4(l.crop.w), r4(l.crop.h)] : null,
+                    l.aspect || null, !!l.muted]));
+            }
+            // What differs from the chosen preset: "layers" and the
+            // settings by name; empty when nothing does (or no preset is
+            // chosen, or it is not loaded yet).
+            function presetChanges() {
+                const name = presetName();
+                const saved = name ? composePresets()[name] : null;
+                if (!saved) return [];
+                const out = [];
+                let now = [];
+                try { now = parseLayers(layersWidget.value || "[]"); } catch (err) { /* refused list */ }
+                if (layersKey(now) !== layersKey(saved.layers)) out.push("layers");
+                for (const key of PRESET_SETTINGS) {
+                    if (saved[key] === undefined) continue;
+                    const v = widgetValue(key, undefined);
+                    if (v !== undefined && String(v) !== String(saved[key])) out.push(key);
+                }
+                return out;
+            }
+            // Value Presets' marks: the chooser's LABEL says "✎ modified"
+            // (its value stays the preset's name), the changed settings
+            // are starred, and save shows only while there is something
+            // to save.
+            let presetChanged = [];
+            function markPresetChanges() {
+                const changed = presetChanges();
+                const key = changed.join(",");
+                if (presetChanged && key === presetChanged.join(",")) return;
+                presetChanged = changed;
+                presetWidget.label = changed.length ? "preset ✎ modified" : "preset";
+                presetWidget.tooltip = changed.length
+                    ? `Changed since '${presetName()}': ${changed.join(", ")}`
+                    : PRESET_TIP;
+                for (const k of PRESET_SETTINGS) {
+                    const w = node.widgets.find((x) => x.name === k);
+                    if (w && !w.hidden) w.label = changed.includes(k) ? k + " *" : k;
+                }
+                paintPresetRow();
+            }
+
+            function paintPresetRow() {
+                const PAL = themePalette();
+                // classic draws its own widgets 15 px in from the node's
+                // edge; Nodes 2.0 lays the row out in its grid already
+                presetRow.style.padding = isVueMode() ? "0 2px" : "0 15px";
+                const named = !!presetName();
+                const changed = presetChanged ?? [];
+                presetButtons.save.hidden = !named || !changed.length;
+                presetButtons.revert.hidden = !named || !changed.length;
+                presetButtons.del.hidden = !named;
+                if (named) presetButtons.revert.title =
+                    `Put back what '${presetName()}' holds, discarding: ${changed.join(", ")}.`;
+                for (const b of Object.values(presetButtons)) {
+                    b.style.background = PAL.rest;
+                    b.style.borderColor = PAL.edge;
+                    b.style.color = PAL.text;
+                }
+                if (named) presetButtons.save.title =
+                    `Overwrite the preset '${presetName()}' with these images and settings`
+                    + (changed.length ? ` (changed: ${changed.join(", ")}).` : ".");
+                const err = composePresetsError();
+                presetRow.title = err || "";
+            }
+            const stopPresets = onComposePresetsChange(() => {
+                presetChanged = null;          // re-mark against what was read
+                markPresetChanges();
+            });
+            state.presetsReady = true;
+            paintPresetRow();
+
             const addButton = node.addWidget(
                 "button", "＋ add image", null, pickFiles);
             const pickWidget = node.addWidget(
@@ -1046,9 +1334,18 @@ app.registerExtension({
                 return w ? w.value : fallback;
             }
 
+            // The layers that are on, by index: the sheet and the separate
+            // images are made of these, in this order.
+            function activeLayers() {
+                const out = [];
+                state.layers.forEach((layer, i) => { if (!layer.muted) out.push(i); });
+                return out;
+            }
+
             function currentPlan() {
                 state.planError = "";
-                const sizes = state.layers.map(layerSize);
+                const active = activeLayers();
+                const sizes = active.map((i) => layerSize(state.layers[i]));
                 if (!sizes.length || sizes.some((s) => s == null)) return null;
                 // 0 is a value here (no cap), so no `|| 1` fallback.
                 const mpRaw = Number(widgetValue("max_megapixels", 1));
@@ -1061,16 +1358,22 @@ app.registerExtension({
                 const target = widgetValue("target_aspect", "auto");
                 const gap = Number(widgetValue("gap", 0));
                 const sizing = widgetValue("sizing", SIZINGS[0]);
+                const padding = Math.max(0, Math.min(1024,
+                    Math.floor(Number(widgetValue("padding", 0)) || 0)));
                 if (!safePlanInputs(sizes, mp, gap, target)
                     || !(Object.hasOwn(TARGET_ASPECTS, target) || (Number.isFinite(Number(target)) && Number(target) > 0 && Number(target) <= 16384))) {
                     state.planError = "Invalid or oversized compose layout (see README safety limits)";
                     return null;
                 }
-                const key = JSON.stringify([sizes, mp, target, gap, sizing]);
+                const key = JSON.stringify([sizes, mp, target, gap, sizing,
+                                            padding, active]);
                 if (key !== state.planKey) {
                     state.planFailure = "";
-                    state.plan = planLayout(sizes, mp, target, gap, ALIGN,
-                                            sizing);
+                    state.plan = padPlan(planLayout(sizes, mp, target, gap,
+                                                    ALIGN, sizing),
+                                         padding, ALIGN);
+                    // plan.boxes[k] is the slot of layer active[k]
+                    if (state.plan) state.plan.active = active;
                     if (state.plan && (Math.max(state.plan.width, state.plan.height) > 16384
                         || state.plan.width * state.plan.height > 32 * 1024 * 1024)) {
                         state.planFailure = "Compose canvas exceeds the 32 Mi-pixel / 16384 side limit";
@@ -1207,8 +1510,9 @@ app.registerExtension({
                                                         "black")] ?? 0));
                             ctx.fillStyle = `rgb(${lvl},${lvl},${lvl})`;
                             ctx.fillRect(px0, py0, pw, ph);
-                            for (let j = 0; j < state.layers.length; j++) {
-                                const slot = plan.boxes[j];
+                            for (let k = 0; k < plan.active.length; k++) {
+                                const j = plan.active[k];
+                                const slot = plan.boxes[k];
                                 const src = sourceRect(state.layers[j]);
                                 const th = thumbs.get(state.layers[j].image);
                                 if (!slot || !src || !th || !th.img) continue;
@@ -1234,9 +1538,12 @@ app.registerExtension({
                             const scale = Math.min(cellW / rect[2], cellH / rect[3]);
                             const dw = rect[2] * scale;
                             const dh = rect[3] * scale;
+                            // a muted layer is still listed, faded
+                            if (layer.muted) ctx.globalAlpha = 0.3;
                             ctx.drawImage(
                                 entry.img, rect[0], rect[1], rect[2], rect[3],
                                 cellX + (cellW - dw) / 2, cellY + (cellH - dh) / 2, dw, dh);
+                            ctx.globalAlpha = 1;
                         } else {
                             ctx.fillStyle = "#ffffff10";
                             ctx.fillRect(cellX, cellY, cellW, cellH);
@@ -1247,6 +1554,11 @@ app.registerExtension({
                                 ctx.fillText("?", cellX + cellW / 2, cellY + cellH / 2);
                                 ctx.textAlign = "left";
                             }
+                        }
+                        if (hovered || selected || layer.muted) {
+                            // Mute badge, top-left of the cell: always
+                            // shown on a muted layer, so the list says so.
+                            drawMuteBadge(ctx, x + 9, top + 8, layer.muted);
                         }
                         if (hovered || selected) {
                             // Delete badge, top-right of the cell.
@@ -1294,7 +1606,76 @@ app.registerExtension({
                 return { x, y, w, h, entryHeight: eh, rows };
             }
 
+            // An eye in a dark disc: open while the layer is on, shut and
+            // struck through (amber) while it is muted. Vector strokes,
+            // never a text glyph.
+            function drawMuteBadge(ctx, bx, by, muted) {
+                ctx.save();
+                ctx.fillStyle = "rgba(0,0,0,0.65)";
+                ctx.beginPath();
+                ctx.arc(bx, by, 6, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.strokeStyle = muted ? "#e8b86b" : "#ddd";
+                ctx.lineWidth = 1.2;
+                ctx.beginPath();
+                ctx.moveTo(bx - 3.6, by);
+                ctx.quadraticCurveTo(bx, by - 3.4, bx + 3.6, by);
+                ctx.quadraticCurveTo(bx, by + 3.4, bx - 3.6, by);
+                ctx.stroke();
+                if (muted) {
+                    ctx.beginPath();
+                    ctx.moveTo(bx - 3.4, by + 3.4);
+                    ctx.lineTo(bx + 3.4, by - 3.4);
+                    ctx.stroke();
+                } else {
+                    ctx.fillStyle = "#ddd";
+                    ctx.beginPath();
+                    ctx.arc(bx, by, 1.2, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+                ctx.restore();
+            }
+
+            // The band of buttons under a view's image (VP chrome: the
+            // themePalette rest/edge/text, 4px radius, 10px type). Rects
+            // are remembered for the pointer handler, which gives them
+            // first claim on clicks.
+            const PILL_H = 20;
+            const PILL_BAND = PILL_H + GUTTER;
+            function drawPill(ctx, PAL, key, text, px, py) {
+                ctx.font = "10px sans-serif";
+                ctx.textAlign = "left";
+                ctx.textBaseline = "middle";
+                const ppW = ctx.measureText(text).width + 16;
+                // restRgb, not rest: rest is a var() string for DOM
+                // styles, and canvas fillStyle silently ignores it
+                ctx.fillStyle = PAL.restRgb ?? PAL.rest;
+                roundedPath(ctx, px, py, ppW, PILL_H, 4);
+                ctx.fill();
+                if (state.pillHover === key) {
+                    // snapBtn's off-state hover, the only hover the
+                    // shared chrome has (same as the VP buttons)
+                    ctx.fillStyle = "rgba(127,127,127,0.3)";
+                    roundedPath(ctx, px, py, ppW, PILL_H, 4);
+                    ctx.fill();
+                }
+                ctx.strokeStyle = PAL.edge;
+                ctx.lineWidth = 1;
+                roundedPath(ctx, px + 0.5, py + 0.5, ppW - 1, PILL_H - 1, 4);
+                ctx.stroke();
+                ctx.fillStyle = PAL.text;
+                ctx.fillText(text, px + 8, py + PILL_H / 2 + 0.5);
+                state.pills[key] = { x: px, y: py, w: ppW, h: PILL_H };
+                ctx.textBaseline = "alphabetic";
+                return ppW;
+            }
+            function pillWidth(ctx, text) {
+                ctx.font = "10px sans-serif";
+                return ctx.measureText(text).width + 16;
+            }
+
             function drawResult(ctx, x, y, w, h, u, lowQuality) {
+                state.pills = {};
                 const plan = currentPlan();
                 if (!plan) {
                     ctx.fillStyle = "#00000033";
@@ -1304,16 +1685,20 @@ app.registerExtension({
                     ctx.textAlign = "center";
                     ctx.textBaseline = "middle";
                     ctx.fillText(
-                        state.layers.length ? "loading…" : "drop images here",
+                        !state.layers.length ? "drop images here"
+                            : activeLayers().length ? "loading…"
+                                : "every layer is muted",
                         x + w / 2, y + h / 2);
                     return null;
                 }
 
-                const scale = Math.min(w / plan.width, h / plan.height);
+                // the image above, the gap button in the band under it
+                const imgH = Math.max(1, h - PILL_BAND);
+                const scale = Math.min(w / plan.width, imgH / plan.height);
                 const bw = plan.width * scale;
                 const bh = plan.height * scale;
                 const bx = x + (w - bw) / 2;
-                const by = y + (h - bh) / 2;
+                const by = y + (imgH - bh) / 2;
 
                 const fill = BACKGROUNDS[widgetValue("background", "black")] ?? 0;
                 const level = Math.round(fill * 255);
@@ -1321,8 +1706,9 @@ app.registerExtension({
                 ctx.fillRect(bx, by, bw, bh);
 
                 state.geo.slots = [];
-                for (let i = 0; i < state.layers.length; i++) {
-                    const [px, py, pw, ph] = plan.boxes[i];
+                for (let k = 0; k < plan.active.length; k++) {
+                    const i = plan.active[k];
+                    const [px, py, pw, ph] = plan.boxes[k];
                     const dx = bx + px * scale;
                     const dy = by + py * scale;
                     const dw = pw * scale;
@@ -1360,6 +1746,12 @@ app.registerExtension({
                         ctx.fillText(label, dx + 6, dy + 5);
                     }
                 }
+                if (!lowQuality) {
+                    const PAL = themePalette();
+                    drawPill(ctx, PAL, "gap",
+                             "gap: " + Math.floor(Number(widgetValue("gap", 0)) || 0) + " px",
+                             bx, Math.min(by + bh + GUTTER, y + h - PILL_H));
+                }
                 return plan;
             }
 
@@ -1383,10 +1775,6 @@ app.registerExtension({
                 // The aspect pill lives in a reserved band under the
                 // image rather than on top of it -- overlap read as
                 // part of the picture.
-                const PILL_H = 20;
-                // the same 6px the list/image gutter uses, so the pill's
-                // spacing reads as part of one grid
-                const PILL_BAND = PILL_H + GUTTER;
                 const imgH = Math.max(1, h - PILL_BAND);
                 const scale = Math.min(w / img.width, imgH / img.height);
                 const bw = img.width * scale;
@@ -1438,51 +1826,24 @@ app.registerExtension({
                     ctx.fillText(label, tx + 3, ty);
                 }
 
-                // The layer's button row, in the band under the
-                // image: aspect lock and duplicate on the left, delete
-                // on the far right. Same chrome as the Value Presets
-                // buttons (themePalette rest/edge/text, 4px radius,
-                // 10px type); rects are remembered for the pointer
-                // handler, which gives them first claim on clicks.
+                // The layer's button row, in the band under the image:
+                // aspect lock and duplicate on the left, mute and delete
+                // on the far right. Anchored to the IMAGE, not the
+                // editor area: the image is centered in the area, so
+                // area-relative margins read as random air. Flush with
+                // the picture's edges, the same gutter-width gap below
+                // it as everywhere else.
                 const PAL = themePalette();
-                ctx.font = "10px sans-serif";
-                ctx.textAlign = "left";
-                ctx.textBaseline = "middle";
-                const ppH = PILL_H;
-                // Anchored to the IMAGE, not the editor area: the image
-                // is centered in the area, so area-relative margins read
-                // as random air. Flush with the picture's edges, the
-                // same gutter-width gap below it as everywhere else.
-                const ppY = Math.min(by + bh + GUTTER, y + h - ppH);
-                const pill = (key, text, px) => {
-                    const ppW = ctx.measureText(text).width + 16;
-                    // restRgb, not rest: rest is a var() string for DOM
-                    // styles, and canvas fillStyle silently ignores it
-                    ctx.fillStyle = PAL.restRgb ?? PAL.rest;
-                    roundedPath(ctx, px, ppY, ppW, ppH, 4);
-                    ctx.fill();
-                    if (state.pillHover === key) {
-                        // snapBtn's off-state hover, the only hover the
-                        // shared chrome has (same as the VP buttons)
-                        ctx.fillStyle = "rgba(127,127,127,0.3)";
-                        roundedPath(ctx, px, ppY, ppW, ppH, 4);
-                        ctx.fill();
-                    }
-                    ctx.strokeStyle = PAL.edge;
-                    ctx.lineWidth = 1;
-                    roundedPath(ctx, px + 0.5, ppY + 0.5, ppW - 1, ppH - 1, 4);
-                    ctx.stroke();
-                    ctx.fillStyle = PAL.text;
-                    ctx.fillText(text, px + 8, ppY + ppH / 2 + 0.5);
-                    state.pills[key] = { x: px, y: ppY, w: ppW, h: ppH };
-                    return ppW;
-                };
+                const ppY = Math.min(by + bh + GUTTER, y + h - PILL_H);
                 state.pills = {};
-                const aspectW = pill(
-                    "aspect", "aspect: " + (layer.aspect ?? "free"), bx);
-                pill("dup", "duplicate", bx + aspectW + GUTTER);
-                const delW = ctx.measureText("delete").width + 16;
-                pill("del", "delete", bx + bw - delW);
+                const aspectW = drawPill(ctx, PAL, "aspect",
+                    "aspect: " + (layer.aspect ?? "free"), bx, ppY);
+                drawPill(ctx, PAL, "dup", "duplicate", bx + aspectW + GUTTER, ppY);
+                const delW = pillWidth(ctx, "delete");
+                const muteText = layer.muted ? "unmute" : "mute";
+                const muteW = pillWidth(ctx, muteText);
+                drawPill(ctx, PAL, "mute", muteText, bx + bw - delW - GUTTER - muteW, ppY);
+                drawPill(ctx, PAL, "del", "delete", bx + bw - delW, ppY);
                 ctx.textBaseline = "alphabetic";
             }
 
@@ -1490,15 +1851,19 @@ app.registerExtension({
                 const plan = currentPlan();
                 const segments = [];
                 const n = state.layers.length;
+                const muted = n - activeLayers().length;
+                const mutedNote = muted ? ` (${muted} muted)` : "";
                 const error = state.error || state.planError;
                 if (error) {
                     segments.push([error, false]);
                 } else if (!n) {
                     segments.push(["＋ add image, or drop files on the node", true]);
                 } else if (!plan) {
-                    segments.push([`${n} layer${n === 1 ? "" : "s"} · reading sizes…`, true]);
+                    segments.push([muted === n
+                        ? `${n} layer${n === 1 ? "" : "s"}, all muted`
+                        : `${n} layer${n === 1 ? "" : "s"}${mutedNote} · reading sizes…`, true]);
                 } else {
-                    segments.push([`${n} layer${n === 1 ? "" : "s"} → `, true]);
+                    segments.push([`${n} layer${n === 1 ? "" : "s"}${mutedNote} → `, true]);
                     segments.push([`${plan.width} × ${plan.height}`, false]);
                     let tail = ` · ${(plan.width * plan.height / 1048576).toFixed(2)} MP`;
                     // A packed sheet has no rows to name; what it has is
@@ -1515,8 +1880,9 @@ app.registerExtension({
                             : ` · ${Math.round(plan.scale * 100)}% of source`;
                     }
                     segments.push([tail, true]);
-                    if (state.sel >= 0 && plan.boxes[state.sel]) {
-                        const b = plan.boxes[state.sel];
+                    const k = plan.active.indexOf(state.sel);
+                    if (state.sel >= 0 && k >= 0 && plan.boxes[k]) {
+                        const b = plan.boxes[k];
                         segments.push([`   slot `, true]);
                         segments.push([`${b[2]} × ${b[3]}`, false]);
                     }
@@ -1658,6 +2024,10 @@ app.registerExtension({
                             removeLayer(hit);
                             return true;
                         }
+                        if (hit >= 0 && onMuteBadge(px, py, hit)) {
+                            toggleMute(hit);
+                            return true;
+                        }
                         state.sel = hit;
                         state.listDrag = hit >= 0
                             ? { from: hit, to: hit, startY: py, moved: false } : null;
@@ -1690,6 +2060,10 @@ app.registerExtension({
 
                     // ---- the result view: clicking a slot selects it ----
                     if (state.sel < 0) {
+                        if (down && pillAt(px, py) === "gap") {
+                            openGapMenu(event);
+                            return true;
+                        }
                         if (down) {
                             for (const slot of geo.slots) {
                                 if (px >= slot.x && px <= slot.x + slot.w
@@ -1725,6 +2099,10 @@ app.registerExtension({
                         if (hitPill === "del") {
                             removeLayer(state.sel);
                             repaint();
+                            return true;
+                        }
+                        if (hitPill === "mute") {
+                            toggleMute(state.sel);
                             return true;
                         }
                         if (px < bx || px > bx + bw || py < by || py > by + bh) return false;
@@ -1905,6 +2283,61 @@ app.registerExtension({
                 return idx;
             }
 
+            // the mute badge, top-left of a list entry (see drawList)
+            function onMuteBadge(px, py, index) {
+                const geo = state.geo?.list;
+                if (!geo || index < 0) return false;
+                const top = geo.y + (index + 1) * geo.entryHeight - state.scroll;
+                const bx = geo.x + 9;
+                const by = top + 8;
+                return (px - bx) * (px - bx) + (py - by) * (py - by) <= 49;
+            }
+
+            // Muted: still in the list (and selectable -- extras'
+            // selected_image takes it alone), but out of the sheet and
+            // out of the separate images.
+            function toggleMute(index) {
+                const layer = state.layers[index];
+                if (!layer) return;
+                layer.muted = !layer.muted;
+                state.planKey = "";
+                syncLayers();
+                repaint();
+            }
+
+            function openGapMenu(event) {
+                const now = Math.floor(Number(widgetValue("gap", 0)) || 0);
+                const choices = [0, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64];
+                const set = (v) => {
+                    if (!gapWidget) return;
+                    gapWidget.value = v;
+                    gapWidget.callback?.(v);
+                    state.planKey = "";
+                    repaint();
+                };
+                const items = choices.map((v) => ({
+                    content: v + " px" + (v === now ? "  \u2713" : ""),
+                    callback: () => set(v),
+                }));
+                items.push(null, {
+                    content: "other…" + (choices.includes(now) ? "" : `  (${now} px \u2713)`),
+                    callback: async () => {
+                        const typed = await askText("Gap between the layers, in pixels (0 to 256):",
+                                                    { value: String(now), ok: "Set" });
+                        if (typed == null) return;
+                        const v = Math.floor(Number(typed));
+                        if (!Number.isFinite(v) || v < 0 || v > 256) {
+                            void notice("The gap is a whole number of pixels from 0 to 256.");
+                            return;
+                        }
+                        set(v);
+                    },
+                });
+                new LiteGraph.ContextMenu(items, {
+                    event, title: "gap between layers", className: "dark",
+                });
+            }
+
             function onDeleteBadge(px, py, index) {
                 const geo = state.geo?.list;
                 if (!geo || index < 0) return false;
@@ -1977,10 +2410,12 @@ app.registerExtension({
                     && py >= geo.list.y && py <= geo.list.y + geo.list.h) {
                     const idx = rowAt(px, py);
                     if (idx == null) return "default";
-                    if (idx >= 0 && onDeleteBadge(px, py, idx)) return "pointer";
+                    if (idx >= 0 && (onDeleteBadge(px, py, idx)
+                                     || onMuteBadge(px, py, idx))) return "pointer";
                     return idx >= 0 ? "grab" : "pointer";
                 }
                 if (state.sel < 0) {
+                    if (pillAt(px, py)) return "pointer";
                     for (const slot of geo.slots) {
                         if (px >= slot.x && px <= slot.x + slot.w
                             && py >= slot.y && py <= slot.y + slot.h) return "pointer";
@@ -2057,8 +2492,7 @@ app.registerExtension({
                         }
                     }
                 }
-                const pillHover = state.sel >= 0
-                    ? pillAt(pos[0], pos[1]) : null;
+                const pillHover = pillAt(pos[0], pos[1]);
                 if (hover !== state.hover || slot !== state.hoverSlot
                         || pillHover !== (state.pillHover ?? null)) {
                     state.hover = hover;
@@ -2117,7 +2551,7 @@ app.registerExtension({
 
             // Any of these changes the layout without touching a layer.
             for (const name of ["max_megapixels", "target_aspect", "gap",
-                                "background", "sizing"]) {
+                                "background", "sizing", "padding"]) {
                 const w = node.widgets.find((x) => x.name === name);
                 if (!w) continue;
                 const prev = w.callback;
@@ -2134,6 +2568,7 @@ app.registerExtension({
                 state.removed = true;
                 window.removeEventListener("keydown", onKeyDown, true);
                 fileInput?.remove();
+                stopPresets();
                 return prevOnRemoved?.apply(this, arguments);
             };
 
@@ -2141,8 +2576,16 @@ app.registerExtension({
             node.onConfigure = function () {
                 const r = prevOnConfigure?.apply(this, arguments);
                 // Workflow load assigns widgets_values directly, with no
-                // callbacks, so the layer list has to be re-read here.
-                readLayers();
+                // callbacks, so the layer list -- and the selection, which
+                // must be adopted rather than written over by the repaint
+                // below -- has to be re-read here. (Values that land after
+                // this are picked up by the next draw the same way.)
+                state.seen = undefined;
+                state.selSeen = undefined;
+                followValue();
+                // the preset name comes back with the properties
+                presetWidget.value = presetName() || NO_PRESET;
+                presetChanged = null;          // re-mark against the loaded values
                 const lw = Number(this.properties?.obvpm_list_w);
                 state.listW = Number.isFinite(lw) && lw > 0 ? lw : null;
                 state.planKey = "";
@@ -2150,8 +2593,29 @@ app.registerExtension({
                 return r;
             };
 
+            // extras is a bundle (output 1): its fields, named here for the
+            // Unbundles that take it apart -- and, one level down, the
+            // fields of images_bundle, one per layer that is on.
+            node.obvpmBundleNames = function (slot, path = []) {
+                if (slot !== 1) return null;
+                if (!path.length) return ["images", "selected_image", "images_bundle"];
+                if (path.length === 1 && path[0] === "images_bundle") {
+                    return activeLayers().map((_, k) => `image_${k}`);
+                }
+                return null;
+            };
+
             readLayers();
             refreshInputFiles();
+            void loadComposePresets();
+            // A new node is sized before these widgets were added, so it
+            // came out shorter than its own content (343 against 374 in
+            // classic) and grew on its first reload. Grown here, once: a
+            // loaded node gets its saved size after this, in configure.
+            const min = node.computeSize?.();
+            if (min && node.size && node.size[1] < min[1]) {
+                node.setSize([node.size[0], min[1]]);
+            }
             return result;
         };
     },

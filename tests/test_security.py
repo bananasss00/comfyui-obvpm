@@ -129,7 +129,10 @@ class ImageSafetyTests(unittest.TestCase):
         # optional input, so a spare Picture slot need not be bypassed
         with patch.object(compose, "_load_layer", side_effect=AssertionError("no decode")):
             for empty in ("", "[]", "  "):
-                self.assertEqual(compose.LoadImagesCompose().compose(empty), (None,))
+                image, extras = compose.LoadImagesCompose().compose(empty)
+                self.assertIsNone(image)
+                self.assertEqual(extras, {"images": [], "selected_image": None,
+                                          "images_bundle": {}})
 
     def test_compose_preflight_before_loading_any_layer(self):
         with patch.object(compose, "_load_layer", side_effect=AssertionError("no decode")):
@@ -161,7 +164,11 @@ class ImageSafetyTests(unittest.TestCase):
             self.assertFalse(reads)
 
     def test_layer_json_and_pixel_limits(self):
-        self.assertEqual(compose._parse_layers(json.dumps([self.name])), [(self.name, None, None)])
+        self.assertEqual(compose._parse_layers(json.dumps([self.name])), [(self.name, None, None, False)])
+        self.assertEqual(compose._parse_layers(json.dumps([{"image": self.name, "muted": True}])),
+                         [(self.name, None, None, True)])
+        # only a real true mutes: a stray string does not
+        self.assertEqual(compose._parse_layers(json.dumps([{"image": self.name, "muted": "yes"}]))[0][3], False)
         with self.assertRaisesRegex(ValueError, "64 layers"):
             compose._parse_layers(json.dumps([self.name] * 65))
         with self.assertRaisesRegex(ValueError, "byte limit"):
@@ -329,13 +336,101 @@ class ImageSafetyTests(unittest.TestCase):
             self.assertEqual(images.shape[0], 3)
             self.assertEqual(tuple(masks.shape), tuple(images.shape[:3]))
             self.assertLess(images.shape[1] * images.shape[2], 128)
-            result, = compose.LoadImagesCompose().compose(json.dumps([self.name]), max_megapixels=0)
+            result, _extras = compose.LoadImagesCompose().compose(json.dumps([self.name]), max_megapixels=0)
             self.assertEqual(tuple(result.shape), (1, 16, 32, 3))
             with self.assertRaisesRegex(ValueError, "gap"):
                 compose.LoadImagesCompose().compose(json.dumps([self.name]), gap=1e300)
             with patch.object(compose.compose_layout, "plan", return_value={"width": 16384, "height": 16384}), patch.object(torch, "full", side_effect=AssertionError("no allocation")):
                 with self.assertRaisesRegex(ValueError, "safety limit"):
                     compose.LoadImagesCompose().compose(json.dumps([self.name]), max_megapixels=0)
+
+
+@unittest.skipUnless(HAS_TORCH, "Torch unavailable; run embedded Python for tensors")
+class ComposeExtrasTests(unittest.TestCase):
+    """The extras bundle, muted layers, padding and the selection."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name) / "input"
+        root.mkdir()
+        self._input = folders.get_input_directory
+        folders.get_input_directory = lambda: str(root)
+        # three plain images of known size and colour
+        for name, size, colour in (("red.png", (32, 16), (255, 0, 0)),
+                                   ("green.png", (16, 16), (0, 255, 0)),
+                                   ("blue.png", (8, 24), (0, 0, 255))):
+            Image.new("RGB", size, colour).save(root / name)
+        comfy = types.ModuleType("comfy")
+        utils = types.ModuleType("comfy.utils")
+        utils.common_upscale = lambda tensor, w, h, *_: torch.nn.functional.interpolate(
+            tensor, (h, w), mode="nearest")
+        comfy.utils = utils
+        self.modules = patch.dict(sys.modules, {"comfy": comfy, "comfy.utils": utils})
+        self.modules.start()
+
+    def tearDown(self):
+        self.modules.stop()
+        folders.get_input_directory = self._input
+        self.temp.cleanup()
+
+    def run_node(self, layers, **kw):
+        return compose.LoadImagesCompose().compose(json.dumps(layers), max_megapixels=0, **kw)
+
+    def test_extras_hold_each_layer_at_its_own_size(self):
+        image, extras = self.run_node(["red.png", {"image": "green.png", "crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}}])
+        self.assertEqual([tuple(t.shape) for t in extras["images"]], [(1, 16, 32, 3), (1, 16, 8, 3)])
+        self.assertEqual(list(extras["images_bundle"]), ["image_0", "image_1"])
+        self.assertIs(extras["images_bundle"]["image_1"], extras["images"][1])
+        self.assertIs(extras["selected_image"], image, "Result selected: the packed image")
+        self.assertEqual(float(extras["images"][1][0, 0, 0, 1]), 1.0)
+
+    def test_a_muted_layer_is_left_out_and_the_rest_renumbered(self):
+        layers = ["red.png", {"image": "green.png", "muted": True}, "blue.png"]
+        image, extras = self.run_node(layers)
+        self.assertEqual([tuple(t.shape[1:3]) for t in extras["images"]], [(16, 32), (24, 8)])
+        self.assertEqual(list(extras["images_bundle"]), ["image_0", "image_1"])
+        # and not in the sheet: no green anywhere in it
+        self.assertEqual(float(image[..., 1].max()), 0.0)
+        everything_off = [{"image": "red.png", "muted": True}]
+        image, extras = self.run_node(everything_off)
+        self.assertIsNone(image)
+        self.assertEqual(extras["images"], [])
+
+    def test_the_selection_is_what_selected_image_is(self):
+        layers = ["red.png", {"image": "green.png", "muted": True}, "blue.png"]
+        _image, extras = self.run_node(layers, selected=2)
+        self.assertIs(extras["selected_image"], extras["images"][1])
+        # a muted layer can still be selected and taken alone
+        _image, extras = self.run_node(layers, selected=1)
+        self.assertEqual(tuple(extras["selected_image"].shape), (1, 16, 16, 3))
+        self.assertEqual(float(extras["selected_image"][0, 0, 0, 1]), 1.0)
+        # a selection past the list (a stale one) is Result
+        image, extras = self.run_node(layers, selected=9)
+        self.assertIs(extras["selected_image"], image)
+
+    def test_padding_frames_the_sheet_and_each_image(self):
+        image0, _ = self.run_node(["red.png", "blue.png"])
+        image, extras = self.run_node(["red.png", "blue.png"], padding=5, background="white")
+        h0, w0 = image0.shape[1:3]
+        self.assertEqual(image.shape[1] % 16, 0)
+        self.assertEqual(image.shape[2] % 16, 0)
+        self.assertGreaterEqual(image.shape[1], h0 + 10)
+        self.assertGreaterEqual(image.shape[2], w0 + 10)
+        # every side keeps at least the padding of background
+        for edge in (image[0, :5], image[0, -5:], image[0, :, :5], image[0, :, -5:]):
+            self.assertEqual(float(edge.min()), 1.0)
+        red = extras["images"][0]
+        self.assertEqual(tuple(red.shape), (1, 26, 42, 3))
+        self.assertEqual(float(red[0, 0, 0].min()), 1.0)          # the padding
+        self.assertEqual(tuple(red[0, 5, 5].tolist()), (1.0, 0.0, 0.0))
+
+    def test_pad_plan_aligns_and_centres(self):
+        layout = {"width": 48, "height": 32, "boxes": [(0, 0, 48, 32)], "fill": 1.0,
+                  "rows": None, "scale": 1.0, "order": "given"}
+        padded = compose.compose_layout.pad_plan(layout, 5)
+        self.assertEqual((padded["width"], padded["height"]), (64, 48))
+        self.assertEqual(padded["boxes"], [(8, 8, 48, 32)])
+        self.assertIs(compose.compose_layout.pad_plan(layout, 0), layout)
 
 
 class PresetTests(unittest.TestCase):

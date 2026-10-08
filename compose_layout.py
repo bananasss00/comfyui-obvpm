@@ -840,3 +840,27 @@ def plan(sizes, max_megapixels, target_aspect="auto", gap=0, align=ALIGN,
         return _plan_fill([w / h for w, h in pairs], budget, target, gap,
                           align)
     return _plan_natural(pairs, budget, target, gap, align)
+
+
+def pad_plan(layout, padding, align=ALIGN):
+    """`layout` with `padding` pixels of background all round the sheet.
+
+    Applied AFTER planning: the megapixel cap is the layers' budget, and
+    the padding is added around what they were given. The canvas grows by
+    twice the padding and is aligned up again, the extra split evenly, so
+    the sides stay a multiple of `align` and every side gets at least the
+    padding asked for. Mirrored by padPlan in web/compose_images.js.
+    """
+    if layout is None:
+        return None
+    pad = max(0, int(padding))
+    if not pad:
+        return layout
+    width = _align_up(layout["width"] + 2 * pad, align)
+    height = _align_up(layout["height"] + 2 * pad, align)
+    ox = (width - layout["width"]) // 2
+    oy = (height - layout["height"]) // 2
+    boxes = [(x + ox, y + oy, w, h) for x, y, w, h in layout["boxes"]]
+    covered = sum(b[2] * b[3] for b in boxes)
+    return dict(layout, width=width, height=height, boxes=boxes,
+                fill=covered / float(width * height))

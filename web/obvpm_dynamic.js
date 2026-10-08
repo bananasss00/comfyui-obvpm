@@ -345,15 +345,49 @@ export function packerOf(node, slotName, depth = 0) {
     return { node: origin, inputs, names: listLines(origin, "names") };
 }
 
+/**
+ * An Unbundle output that carries a bundle another pack's node made: that
+ * node, its output slot, and the field names down to this one --
+ * `[outer, inner, ...]` -- so the node can name the fields of a bundle it
+ * nested inside its own (`node.obvpmBundleNames(slot, path)`). Null when
+ * the wire does not lead back to such a node.
+ */
+function fieldPathOf(unbundle, slot, depth) {
+    if (depth >= 8) return null;
+    const out = unbundle.outputs?.[slot];
+    const field = out ? (out.label || out.localized_name || out.name) : "";
+    if (!field) return null;
+    const up = bundleSourceFor(unbundle, "in", depth + 1);
+    if (!up?.node) return null;
+    if (isUnbundle(up.node)) {
+        const outer = fieldPathOf(up.node, up.slot, depth + 1);
+        return outer ? { ...outer, path: [...outer.path, field] } : null;
+    }
+    if (typeof up.node.obvpmBundleNames === "function") {
+        return { node: up.node, slot: up.slot, path: [field] };
+    }
+    return null;
+}
+
 export function bundleNamesFor(node, slotName, depth = 0) {
     if (depth >= 8) return null;
     const src = bundleSourceFor(node, slotName, depth);
     if (!src) return null;
     const origin = src.node;
     // A bundle taken out of another bundle: the names are the inner
-    // Bundle's, found through the Unbundle (see packerOf).
+    // Bundle's, found through the Unbundle (see packerOf) -- or, when
+    // another pack's node packed the outer one, that node's own answer
+    // for the field path (see fieldPathOf).
     if (isUnbundle(origin)) {
-        return packerOf(node, slotName, depth)?.names ?? null;
+        const packed = packerOf(node, slotName, depth)?.names;
+        if (packed) return packed;
+        const at = fieldPathOf(origin, src.slot, depth + 1);
+        if (!at) return null;
+        try {
+            return at.node.obvpmBundleNames(at.slot, at.path) ?? null;
+        } catch (err) {
+            return null;
+        }
     }
     // Another pack's node that puts out a bundle of its own names its
     // fields itself: `node.obvpmBundleNames(slot)` -> [name, ...].

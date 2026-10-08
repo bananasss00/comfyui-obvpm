@@ -10,9 +10,10 @@ Layers live in the hidden `layers` widget as JSON, managed entirely by
 the editor in `web/compose_images.js`:
 
     [{"image": "refs/face.png", "crop": {"x":0.1,"y":0,"w":0.5,"h":0.8}},
-     {"image": "car.jpg"}]
+     {"image": "car.jpg", "muted": true}]
 
-An absent or null `crop` means the whole image. The coordinates are
+An absent or null `crop` means the whole image. A `muted` layer stays in
+the list but is left out of the sheet and of the separate images. The coordinates are
 normalised exactly like Load Image & Crop's, and both nodes share
 `_parse_crop`, so a crop means the same thing in both places.
 
@@ -32,13 +33,14 @@ import node_helpers
 from .image_safety import (MAX_LAYERS, bounded_text, image_path, inspect_images,
                            hash_images, finite_number, check_pixels, open_checked_image)
 from . import compose_layout
+from .bundle import BUNDLE
 from .load_image_crop import (_input_images, _parse_crop,
                               _aspect_value, _centered_box)
 
 
 def _parse_layers(layers):
     """The layers widget's JSON -> [(image_path, crop_json_or_None,
-    aspect_or_None)].
+    aspect_or_None, muted)].
 
     Tolerant on purpose: this string is written by the frontend, and a
     node that raises on a half-written value is a node that cannot be
@@ -56,7 +58,7 @@ def _parse_layers(layers):
     out = []
     for entry in data:
         if isinstance(entry, str):
-            out.append((entry, None, None))
+            out.append((entry, None, None, False))
             continue
         if not isinstance(entry, dict):
             continue
@@ -69,8 +71,33 @@ def _parse_layers(layers):
         aspect = entry.get("aspect")
         out.append((name,
                     json.dumps(crop) if isinstance(crop, dict) else None,
-                    aspect if _aspect_value(aspect) is not None else None))
+                    aspect if _aspect_value(aspect) is not None else None,
+                    entry.get("muted") is True))
     return out
+
+
+def _padded(tile, padding, fill):
+    """One layer as an IMAGE (1, h, w, 3) with `padding` pixels of
+    background all round -- what the separate images in `extras` are."""
+    h, w = tile.shape[0], tile.shape[1]
+    if not padding:
+        return tile.unsqueeze(0)
+    check_pixels(w + 2 * padding, h + 2 * padding, canvas=True)
+    out = torch.full((1, h + 2 * padding, w + 2 * padding, 3), fill,
+                     dtype=torch.float32)
+    out[0, padding:padding + h, padding:padding + w, :] = tile
+    return out
+
+
+def _extras(images, selected):
+    """The `extras` bundle: the separate images as a list and as a bundle
+    of their own (image_0, image_1, ... -- the layers that are on, in list
+    order), and the one the editor has selected."""
+    return {
+        "images": list(images),
+        "selected_image": selected,
+        "images_bundle": {"image_%d" % i: img for i, img in enumerate(images)},
+    }
 
 
 def _load_layer(name, crop, aspect=None):
@@ -110,8 +137,8 @@ def _load_layer(name, crop, aspect=None):
 class LoadImagesCompose:
     CATEGORY = "obvpm/image"
     FUNCTION = "compose"
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("image",)
+    RETURN_TYPES = ("IMAGE", BUNDLE)
+    RETURN_NAMES = ("image", "extras")
     DESCRIPTION = (
         "Loads several input images as a stack of layers, each with its "
         "own crop, and composes them into ONE image that fits the given "
@@ -127,9 +154,15 @@ class LoadImagesCompose:
     )
 
     OUTPUT_TOOLTIPS = (
-        "The composed sheet, one image containing every layer -- or None "
-        "when the node holds no images, so an unused one can stay in the "
-        "workflow.",
+        "The composed sheet, one image containing every layer that is not "
+        "muted -- or None when there is none, so an unused node can stay "
+        "in the workflow.",
+        "A bundle (Unbundle takes it apart): `images`, the layers that are "
+        "not muted as a list, each cropped and padded at its own size; "
+        "`selected_image`, what is selected in the node's list (a layer, "
+        "cropped, or the packed image when Result is selected); and "
+        "`images_bundle`, the same layers as a bundle of their own, "
+        "image_0, image_1, ...",
     )
 
     @classmethod
@@ -150,9 +183,22 @@ class LoadImagesCompose:
                 }),
                 "background": (list(compose_layout.BACKGROUNDS), {
                     "default": "black",
-                    "tooltip": "Colour behind the layers — seen in the gaps, and in the up-to-16-pixel margin left by rounding.",
+                    "tooltip": "Colour behind the layers — seen in the gaps, the padding, and the up-to-16-pixel margin left by rounding.",
                 }),
-            }
+            },
+            # optional, and declared after the four above: widget values
+            # are saved by position, and saves from before these existed
+            # hold only those four
+            "optional": {
+                "padding": ("INT", {
+                    "default": 0, "min": 0, "max": 1024, "step": 1,
+                    "tooltip": "Pixels of background added all round the packed image, and all round each separate image in extras. Added outside max_megapixels: the cap is the layers' budget.",
+                }),
+                "selected": ("INT", {
+                    "default": -1, "min": -1, "max": MAX_LAYERS - 1,
+                    "tooltip": "Set by clicking in the node's list: which entry extras' selected_image is. -1 = Result, the packed image.",
+                }),
+            },
         }
 
     # target_aspect and sizing are no longer widgets: the alternatives
@@ -167,7 +213,8 @@ class LoadImagesCompose:
     # returns these same defaults when the widget is absent;
     # test_compose_plan.mjs checks the two agree.
     def compose(self, layers, max_megapixels=1.0, target_aspect="auto",
-                gap=0, background="black", sizing="natural"):
+                gap=0, background="black", sizing="natural", padding=0,
+                selected=-1):
         items = _parse_layers(layers)
         if not items:
             # No images is not an error: an empty node passes None on, the
@@ -175,54 +222,72 @@ class LoadImagesCompose:
             # slot can sit in a workflow without being bypassed by hand.
             # (Every consumer here already takes None: Bundle unpacks a
             # missing field as None and the H3 reference node skips it.)
-            return (None,)
+            return (None, _extras([], None))
 
         max_megapixels = finite_number(max_megapixels, "max_megapixels", 0, 128)
         gap = int(finite_number(gap, "gap", 0, 256))
+        padding = int(finite_number(padding, "padding", 0, 1024))
+        selected = int(finite_number(selected, "selected", -1, MAX_LAYERS - 1))
         if not isinstance(target_aspect, (str, int, float)):
             raise ValueError("target_aspect must be a named aspect or finite ratio")
         if target_aspect not in compose_layout.TARGET_ASPECTS:
             finite_number(target_aspect, "target_aspect", 1 / 16384, 16384)
-        for _name, crop, aspect in items:
+        for _name, crop, _aspect, _muted in items:
             _parse_crop(crop, 1, 1)
-        inspect_images([name for name, _crop, _aspect in items])
-        tiles = [_load_layer(name, crop, aspect)
-                 for name, crop, aspect in items]
-        # (width, height) in SOURCE pixels, after the crop -- natural
-        # sizing needs the real sizes, not just the aspect ratios.
-        sizes = [(t.shape[1], t.shape[0]) for t in tiles]
-        layout = compose_layout.plan(
-            sizes, max_megapixels, target_aspect, gap,
-            sizing=sizing)
-
-        width, height = layout["width"], layout["height"]
-        check_pixels(width, height, canvas=True)
+        # The layers that are on, and a selected one even when it is
+        # muted (selecting it is asking for it): nothing else is read.
+        active = [i for i, item in enumerate(items) if not item[3]]
+        if selected >= len(items):
+            selected = -1          # a stale selection: Result
+        wanted = sorted(set(active) | ({selected} if selected >= 0 else set()))
+        inspect_images([items[i][0] for i in wanted])
+        tiles = {i: _load_layer(items[i][0], items[i][1], items[i][2])
+                 for i in wanted}
         fill = compose_layout.BACKGROUNDS.get(background, 0.0)
-        canvas = torch.full((1, height, width, 3), fill, dtype=torch.float32)
 
-        import comfy.utils
+        canvas = None
+        if active:
+            # (width, height) in SOURCE pixels, after the crop -- natural
+            # sizing needs the real sizes, not just the aspect ratios.
+            sizes = [(tiles[i].shape[1], tiles[i].shape[0]) for i in active]
+            layout = compose_layout.pad_plan(compose_layout.plan(
+                sizes, max_megapixels, target_aspect, gap,
+                sizing=sizing), padding)
 
-        for tile, (x, y, w, h) in zip(tiles, layout["boxes"]):
-            # common_upscale wants BCHW; lanczos both ways (a slot can be
-            # larger than its source when one layer is much smaller than
-            # the rest -- the layout fills its row either way).
-            scaled = comfy.utils.common_upscale(
-                tile.unsqueeze(0).movedim(-1, 1), w, h, "lanczos", "disabled"
-            ).movedim(1, -1)
-            canvas[:, y:y + h, x:x + w, :] = scaled.clamp(0.0, 1.0)
+            width, height = layout["width"], layout["height"]
+            check_pixels(width, height, canvas=True)
+            canvas = torch.full((1, height, width, 3), fill, dtype=torch.float32)
 
-        return (canvas,)
+            import comfy.utils
+
+            for i, (x, y, w, h) in zip(active, layout["boxes"]):
+                # common_upscale wants BCHW; lanczos both ways (a slot can
+                # be larger than its source when one layer is much smaller
+                # than the rest -- the layout fills its row either way).
+                scaled = comfy.utils.common_upscale(
+                    tiles[i].unsqueeze(0).movedim(-1, 1), w, h, "lanczos",
+                    "disabled").movedim(1, -1)
+                canvas[:, y:y + h, x:x + w, :] = scaled.clamp(0.0, 1.0)
+
+        singles = [_padded(tiles[i], padding, fill) for i in active]
+        if selected < 0:
+            chosen = canvas
+        elif selected in active:
+            chosen = singles[active.index(selected)]
+        else:
+            chosen = _padded(tiles[selected], padding, fill)
+        return (canvas, _extras(singles, chosen))
 
     @classmethod
     def IS_CHANGED(cls, layers, **_):
         items = _parse_layers(layers)
-        return hash_images([name for name, _crop, _aspect in items],
+        return hash_images([item[0] for item in items],
                            (layers or "[]").encode("utf-8"))
 
     @classmethod
     def VALIDATE_INPUTS(cls, layers, **_):
         try:
-            for name, crop, aspect in _parse_layers(layers):
+            for name, crop, _aspect, _muted in _parse_layers(layers):
                 image_path(name)
                 _parse_crop(crop, 1, 1)
         except (ValueError, OSError) as exc:

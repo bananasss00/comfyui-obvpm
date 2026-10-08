@@ -37,7 +37,8 @@ export function parseLayers(value) {
                 throw new Error("Invalid layer aspect ratio");
             }
         }
-        return { image: entry.image, crop: crop ? { ...crop } : null, aspect: entry.aspect || null };
+        return { image: entry.image, crop: crop ? { ...crop } : null, aspect: entry.aspect || null,
+                 muted: entry.muted === true };
     });
 }
 

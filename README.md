@@ -8,6 +8,7 @@ ComfyUI nodes to save time and keep your workflows tidy. Bundle multiple wires i
 
 ### Latest HEAD
 
+- Load Images & Compose: a second output, `extras` (a bundle of the separate images as a list, the selected one, and `images_bundle` with `image_0`, `image_1`, …); layers can be **muted**; a `padding` widget frames the composed image and each separate image; the gap moved into a pill under the Result view; and **presets** keep whole sets of images and settings in your user folder.
 - Value Presets: export and import single presets, to share them -- each preset has a tick in **Export…**, which opens on your user presets when there are any (one ticked preset downloads as a file named after it) and in **Import…** (only the ticked presets of a file come in).
 
 ### 0.2.14 (2026-10-05)
@@ -162,13 +163,15 @@ The node body is a layer strip on the left, a main view on the right, and one in
 
 - **Select** a layer by clicking it in the strip. **Delete** it with the ✕ badge on the layer, or press Delete or Backspace while the pointer is over the node. Up and Down move the selection along the strip. **Reorder** by dragging a layer up or down the strip; the insertion point is drawn as you go.
 
+- **Mute** a layer with the eye badge at the top left of its entry (or the **mute** pill under its image): it stays in the list, faded with the eye struck through, but is left out of the composed image and of the separate images in `extras` until unmuted.
+
 - **Crop** the selected layer in the main view, exactly like [Load Image & Crop](#load-image--crop): drag to draw, drag inside to move, drag a corner to resize, click outside to clear. Each layer keeps its own crop, and the layout re-plans as you drag.
 
 - **Per-layer aspect lock**: the `aspect: …` pill in the crop view opens a menu of fixed ratios (16:9, 1:1, 4:5, …). With a ratio set that layer's crop keeps the shape while drawing and resizing, switching ratios snaps the crop in place, and with no crop drawn a dashed rectangle shows the largest centered cut of that ratio — which is what composes. Each layer locks independently; `free` is the default.
 
-- Under the image, next to the aspect pill: **duplicate** adds the same image again as a new layer (crop and aspect copied, inserted right after, selected); **delete** on the far right removes the layer — same action as the ✕ badge in the list.
+- Under the image, next to the aspect pill: **duplicate** adds the same image again as a new layer (crop and aspect copied, inserted right after, selected); on the far right, **mute** / **unmute** and **delete** — the same actions as the badges in the list.
 
-- The first entry in the strip is **Result**: the real composition, at the real aspect ratio, each slot labelled with its pixel size. Its thumbnail in the strip is the composition too, so the sheet is visible without selecting it. Clicking a slot there jumps to that layer's crop editor.
+- The first entry in the strip is **Result**: the real composition, at the real aspect ratio, each slot labelled with its pixel size. Its thumbnail in the strip is the composition too, so the sheet is visible without selecting it. Clicking a slot there jumps to that layer's crop editor. The **gap** pill under it sets the space between the layers.
 
 The info line reads `4 layers → 1104 × 928 · 0.98 MP · 92% filled · 57% of source` — how much of the sheet is image, then the single scale factor being applied — and adds the selected layer's slot size.
 
@@ -182,15 +185,26 @@ That makes `max_megapixels` a **cap, not a target**: four 256×256 images compos
 
 The packer sweeps 48 candidate sheet widths and four placement orders — your layer order, then tallest, widest and largest first. **Your order is the default answer** and is only displaced by an ordering that packs at least three points tighter, so dragging layers around still means something. The info line names the order actually used and how full the sheet came out.
 
+- **Presets**: the `preset` dropdown loads a saved set of images and settings (the layers with their crops, aspects and mutes, and `max_megapixels`, `background`, `padding` and gap); **save as** keeps the current one under a name, **save** overwrites the chosen preset, **delete** removes it. Once anything differs from the chosen preset the dropdown reads `preset ✎ modified` (its tooltip says what: the layers, or which settings, which are also starred) and **save** and **revert** appear (revert puts the preset's images and settings back); both are hidden while nothing has changed. Each preset is its own file in your user folder (`user/default/obvpm/compose_presets/<name>.json`), so every Load Images & Compose node in every workflow can use them, and a preset can be shared by passing its file on. A preset names files in the input folder; it does not copy the images.
+
 #### Settings
 
 | Setting          | What it does                                                                                                                                                                                                                      |
 | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `max_megapixels` | Largest the result may be (1.0 = 1024×1024 pixels) — a cap, not a target, so a sheet of small images comes out small. `0` = no cap (in `fill` sizing, a sheet of the sources' total area). Sides are rounded to a multiple of 16. |
-| `gap`            | Pixels of background between layers. `0` puts them flush; a few pixels helps a model tell one reference from the next.                                                                                                            |
-| `background`     | `black`, `grey` or `white` — seen in the gaps and in the up-to-16-pixel margin left by rounding.                                                                                                                                  |
+| `background`     | `black`, `grey` or `white` — seen in the gaps, the padding and the up-to-16-pixel margin left by rounding.                                                                                                                         |
+| `padding`        | Pixels of background all round the composed image and all round each separate image in `extras`. Added outside `max_megapixels` (the cap is the layers' budget); the composed image's sides stay a multiple of 16.                |
+| gap              | Pixels of background between layers, set with the **gap** pill under the Result view. `0` puts them flush; a few pixels helps a model tell one reference from the next.                                                           |
 
-The only output is `image`. Changing any crop, or the file behind any layer, re-executes the node on the next run.
+#### Outputs
+
+- `image`: the composed image, every layer that is not muted.
+- `extras`: a bundle — take it apart with Unbundle:
+  - `images`: the layers that are not muted, as a **list** of images, each cropped and padded at its own size (for nodes that take a list);
+  - `selected_image`: what is selected in the strip — that layer alone, cropped and padded (even when it is muted), or the composed image when **Result** is selected;
+  - `images_bundle`: the same layers as a bundle of their own, `image_0`, `image_1`, … in list order (an Unbundle on it names them).
+
+Changing any crop, mute, the selection, or the file behind any layer re-executes the node on the next run.
 
 ### Downscale Image to Megapixels
 
