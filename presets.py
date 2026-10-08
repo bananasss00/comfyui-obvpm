@@ -684,6 +684,48 @@ def resolve(schema, values, presets=None, preset=CUSTOM, disabled=None):
     return packed, fields
 
 
+STAR = "\u2605 "      # a user preset's label in the chooser: "★ name"
+
+
+def wired_preset(name, presets, user_presets):
+    """The preset a WIRED `preset` input names: (label, values).
+
+    Selected among what the prompt carries -- the workflow presets (the
+    `presets` store) and the user presets the browser sends along while
+    the input is wired (`user_presets`; they live in the user's folder,
+    which this server is never asked to read). A plain name is a
+    workflow preset first, then a user preset; "★ name", as the chooser
+    shows it, is always the user preset. `custom` (or nothing) selects
+    nothing: the node's own values run, as when the input is not wired.
+
+    Refuses an unknown name, listing what it could have been: a typo in
+    a batch must not quietly run the hand-set values.
+    """
+    label = str(name or "").strip()
+    if not label or label == CUSTOM:
+        return CUSTOM, None
+    library = load_store(presets, "presets")
+    users = load_store(user_presets, "user presets")
+    if label.startswith(STAR):
+        bare = label[len(STAR):].strip()
+        found = users.get(bare)
+        label = STAR + bare
+    elif isinstance(library.get(label), dict):
+        found = library[label]
+    else:
+        found = users.get(label)
+        label = STAR + label
+    if isinstance(found, dict):
+        return label, found
+    known = sorted(k for k, v in library.items() if isinstance(v, dict))
+    known += sorted(STAR + k for k, v in users.items() if isinstance(v, dict))
+    raise ValueError(
+        "Value Presets: no preset named %r to select (it came in on the "
+        "'preset' input). The presets here: %s. User presets are only "
+        "sent from the browser, while the input is wired."
+        % (str(name).strip(), ", ".join(known) or "none"))
+
+
 def is_shown(field, shown, packed):
     """Whether `field` is shown, given the fields resolved before it.
 
@@ -987,17 +1029,51 @@ class ValuePresets:
                 # node switches off (config -> Schema, the `on` column),
                 # one per line. Owned by the UI, hidden there.
                 "disabled": ("STRING", {"default": "", "multiline": True}),
+                # LAST, after `disabled`: the user presets of this node's
+                # Preset Type Id, put in the PROMPT by the browser while
+                # `preset` is wired (empty in the saved workflow, and in
+                # every prompt where it is not), so a wired name can
+                # select a user preset. Owned by the UI, hidden there.
+                "user_presets": ("STRING", {"default": "", "multiline": True}),
             },
+            # to see whether `preset` came in on a wire: a wired name
+            # SELECTS a preset, a picked one only labels the values
+            "hidden": {"prompt": "PROMPT", "unique_id": "UNIQUE_ID"},
         }
 
     def pack(self, schema, preset, values="{}", presets="{}", names="", set="",
-             disabled=""):
+             disabled="", user_presets="", prompt=None, unique_id=None):
         # `set` is a name for the browser to join nodes by; nothing to do
         # with it here
         off = parse_disabled(disabled)
+        selected = None
+        if _wired(prompt, unique_id, "preset"):
+            # A wire SELECTS: that preset's saved values run, not the
+            # hand-set ones (a field it was saved without takes its
+            # default, as when it is picked in the chooser). The browser
+            # has usually applied it to the node already, when the name
+            # was known before the run; this also covers a name made
+            # during the run -- a list, a loop, an API prompt.
+            label, saved = wired_preset(preset, presets, user_presets)
+            if saved is not None:
+                values = json.dumps(saved)
+                preset = label
+                selected = label
         packed, _fields = resolve(schema, values, presets, preset, off)
         # the schema and the stored values travel with the bundle, so an
         # Override Bundle Values downstream can check and re-resolve its
         # overrides as this node would (bundle.SchemaBundle)
-        return (SchemaBundle(packed, schema, load_store(values, "values"),
-                             off),)
+        bundle = SchemaBundle(packed, schema, load_store(values, "values"), off)
+        if selected is None:
+            return (bundle,)
+        # which preset ran, for the node's face
+        return {"ui": {"obvpm_preset_ran": [selected]}, "result": (bundle,)}
+
+
+def _wired(prompt, unique_id, name):
+    """Whether this node's input `name` is a link in the prompt (a value
+    arriving from another node) rather than a value typed into it."""
+    try:
+        return isinstance(prompt[str(unique_id)]["inputs"][name], list)
+    except (KeyError, TypeError, IndexError):
+        return False

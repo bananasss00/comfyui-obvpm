@@ -90,9 +90,10 @@ class SetName(unittest.TestCase):
 
     def test_set_is_declared_after_the_older_inputs(self):
         # widgets_values is positional: inputs only ever join at the end
-        # (`disabled`, after `set`, came later still)
+        # (`disabled`, after `set`, came later still; then `user_presets`)
         optional = list(presets.ValuePresets.INPUT_TYPES()["optional"])
-        self.assertEqual(optional, ["values", "presets", "names", "set", "disabled"])
+        self.assertEqual(optional, ["values", "presets", "names", "set", "disabled",
+                                    "user_presets"])
 
 
 if __name__ == "__main__":

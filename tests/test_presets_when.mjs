@@ -61,6 +61,7 @@ async function harness(fields = FIELDS) {
         if (cache.has(name)) return cache.get(name);
         let mod;
         if (name.endsWith("scripts/app.js")) mod = mock({ app });
+        else if (name === "obvpm_dynamic.js") mod = mock({ staticInput: () => undefined });
         else if (name.endsWith("scripts/api.js")) mod = mock({ api });
         else if (name === "obvpm_ui.js") {
             mod = mock({ themePalette: () => ({}), el: noop,

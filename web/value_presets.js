@@ -15,6 +15,7 @@ import { STAR, typeIdOf, cleanTypeId, isUserLabel, bareName,
          userFilters, saveUserFilters, onUserPresetsChange, presetFileText, parseImports,
          mergePresets, pickPresets, exportFileName, download } from "./value_presets_user.js";
 import { constantOn, setMode } from "./obvpm_constants.js";
+import { staticInput } from "./obvpm_dynamic.js";
 import { restoreRows, restoreWrites } from "./value_presets_restore.js";
 import { filterChoices, filterNote, filtersFrom, patternsFrom }
     from "./value_presets_filter.js";
@@ -66,7 +67,10 @@ const DISABLED_W = "disabled";
 // the way in, and a multiline box of syntax sitting above the controls
 // is a second, worse one. It stays a real widget -- it is still the
 // store, still what a workflow carries, and still wire-able.
-const OWNED = [SCHEMA, VALUES, PRESETS, NAMES, DISABLED_W];
+// the user presets a wired `preset` may select, put in the PROMPT only
+// (see setup); declared last in presets.py
+const USER_PRESETS_W = "user_presets";
+const OWNED = [SCHEMA, VALUES, PRESETS, NAMES, DISABLED_W, USER_PRESETS_W];
 
 // Where the built controls start, so buttons can sit after them.
 const MARK = "__obvpmField";
@@ -582,6 +586,11 @@ function refreshState(node) {
         chooser.tooltip = changed.length
             ? "Changed since '" + selected(node) + "': " + changed.join(", ")
             : undefined;
+        const wire = node.__obvpmWire;
+        if (wire) {
+            chooser.label = PRESET + (wire.label || !wire.known ? " ⇠ input" : " ⇠ input ⚠");
+            chooser.tooltip = wireTip(node, wire);
+        }
     }
     // Star the moved fields themselves, not just the summary line: the
     // LABEL only (the widget's name is its identity -- readJson keys,
@@ -634,6 +643,119 @@ function presetNames(node) {
     return [...mine, ...own];
 }
 
+// ------------------------------------------------ a wired preset (issue #20)
+//
+// A name wired into `preset` SELECTS that preset: the server runs its
+// saved values (presets.py wired_preset), looking it up among the
+// workflow presets and the user presets this page puts in the prompt
+// while the input is wired. When the name is known before the run (a
+// text node, a primitive, a switch with a known choice -- staticInput),
+// the node applies it at once, so its face always shows what will run;
+// a name made during the run is applied when the run reports it.
+
+function presetWired(node) {
+    return (node.inputs ?? []).some((i) => i.name === PRESET && i.link != null);
+}
+
+/** The chooser label a wired name stands for (CUSTOM for none), or null
+ *  when it names no preset here -- the rule of presets.py wired_preset. */
+function wiredLabel(node, name) {
+    const text = String(name ?? "").trim();
+    if (!text || text === CUSTOM) return CUSTOM;
+    const lib = typeIdOf(node);
+    const mine = lib ? userPresets(lib) : Object.create(null);
+    const has = (store, key) => Object.prototype.hasOwnProperty.call(store, key)
+        && store[key] && typeof store[key] === "object";
+    if (isUserLabel(text)) {
+        const bare = bareName(text).trim();
+        return has(mine, bare) ? STAR + bare : null;
+    }
+    if (has(readJson(node, PRESETS), text)) return text;
+    return has(mine, text) ? STAR + text : null;
+}
+
+function wireTip(node, wire) {
+    if (!wire.known) {
+        return "Selected by the wire, whose name is only known during the run: "
+            + "the values shown are not necessarily what runs."
+            + (node.__obvpmRan ? " Last run: '" + node.__obvpmRan + "'." : "");
+    }
+    if (!wire.label) {
+        return "The wire names '" + wire.value + "', which is no preset here, so a "
+            + "run is refused. The presets: " + (presetNames(node).join(", ") || "none") + ".";
+    }
+    return "Selected by the wire: '" + wire.label + "'. Its saved values run, "
+        + "whatever is set here by hand.";
+}
+
+/**
+ * Follow the wire: apply the preset it names whenever that is known and
+ * not what the node shows -- a new name, or values edited by hand (the
+ * wire decides what runs, so the face goes back to it).
+ */
+function followWire(node) {
+    if (!node.__obvpmFieldMap || node.__obvpmRemoved) return;
+    const chooser = widget(node, PRESET);
+    if (!chooser) return;
+    if (!presetWired(node)) {
+        node.__obvpmWireApplied = null;
+        if (node.__obvpmWire) {
+            node.__obvpmWire = null;
+            refreshState(node);
+        }
+        return;
+    }
+    const value = staticInput(node, PRESET);
+    const known = typeof value === "string";
+    const label = known ? wiredLabel(node, value) : null;
+    const before = node.__obvpmWire;
+    node.__obvpmWire = { known, value: known ? value.trim() : "", label };
+    const moved = !before || before.known !== known || before.label !== label
+        || before.value !== node.__obvpmWire.value;
+    // Edited by hand since the wire's preset was last applied? Compared
+    // by the values text, so a preset whose values never read back
+    // exactly (a coercion) is not applied again and again; and never
+    // while an apply is still on its way.
+    const applied = node.__obvpmWireApplied;
+    const valuesNow = String(widget(node, VALUES)?.value ?? "");
+    const edited = !applied || (applied.values !== null && applied.values !== valuesNow);
+    if (applied?.values === null) return;
+    if (label && (selected(node) !== label
+                  || (label !== CUSTOM && edited && modifiedFields(node).length))) {
+        chooser.value = label;
+        node.__obvpmWireApplied = { label, values: null };
+        void applyPreset(node).finally(() => {     // ends in refreshState
+            node.__obvpmWireApplied = {
+                label, values: String(widget(node, VALUES)?.value ?? "") };
+        });
+    } else if (moved) {
+        refreshState(node);
+    }
+}
+
+function presetNodes() {
+    const out = [];
+    const walk = (g, level) => {
+        if (!g || level > 8) return;
+        for (const n of g._nodes ?? g.nodes ?? []) {
+            if (n.type === NODE) out.push(n);
+            if (n.subgraph) walk(n.subgraph, level + 1);
+        }
+    };
+    walk(app.rootGraph ?? app.graph, 0);
+    return out;
+}
+
+function followWires() {
+    for (const node of presetNodes()) {
+        try {
+            followWire(node);
+        } catch (err) {
+            console.error("[obvpm-presets] following the preset wire:", err);
+        }
+    }
+}
+
 /** A preset's stored values by its chooser label: the workflow's, or the
  *  user presets for a ★ label. */
 function lookupPreset(node, label) {
@@ -678,6 +800,29 @@ app.registerExtension({
     // console.error only while a workflow loads -- what other packs throw
     // from their load hooks, which the frontend catches and logs.
     setup() {
+        // A wired preset, followed on a short poll and at once after a
+        // click or a key (the value can change anywhere: a text node, a
+        // switch's choice), and right before every prompt is built, with
+        // the user presets read again so the prompt carries them as they
+        // are now.
+        setInterval(followWires, 400);
+        const soon = () => setTimeout(followWires, 30);
+        window.addEventListener("pointerup", soon, true);
+        window.addEventListener("keyup", soon, true);
+        const toPrompt = app.graphToPrompt;
+        if (typeof toPrompt === "function") {
+            app.graphToPrompt = async function (...args) {
+                try {
+                    const ids = new Set(presetNodes().filter(presetWired)
+                        .map(typeIdOf).filter(Boolean));
+                    await Promise.all([...ids].map((id) => loadUserPresets(id, { fresh: true })));
+                    followWires();
+                } catch (err) {
+                    console.error("[obvpm-presets] before the prompt:", err);
+                }
+                return toPrompt.apply(this, args);
+            };
+        }
         listenForPageErrors();
         if (typeof window !== "undefined") {
             window.obvpmPresetsDiag = (id) => {
@@ -771,6 +916,26 @@ app.registerExtension({
             return restoreApplyTo(this, saved, keys);
         };
 
+        // A wired name made during the run: the server says which preset
+        // ran, and the node shows it (its values, as it would have
+        // applied a name known before the run).
+        const executed = nodeType.prototype.onExecuted;
+        nodeType.prototype.onExecuted = function (output) {
+            const r = executed?.apply(this, arguments);
+            const ran = output?.obvpm_preset_ran?.[0];
+            if (typeof ran === "string" && presetWired(this)) {
+                this.__obvpmRan = ran;
+                const chooser = widget(this, PRESET);
+                if (chooser && lookupPreset(this, ran) && selected(this) !== ran) {
+                    chooser.value = ran;
+                    void applyPreset(this);
+                } else {
+                    refreshState(this);
+                }
+            }
+            return r;
+        };
+
         const menu = nodeType.prototype.getExtraMenuOptions;
         nodeType.prototype.getExtraMenuOptions = function (_, options) {
             const r = menu?.apply(this, arguments);
@@ -860,6 +1025,19 @@ function setup(node) {
     // alone, so the schema or the preset name can still be driven from
     // elsewhere.
     dropWidgetSockets(node, OWNED);
+    // The user presets go in the PROMPT while `preset` is wired, for the
+    // server to select from (they live in the user's folder, which it is
+    // never asked to read) -- never in the saved workflow, and not in a
+    // prompt that does not need them: a prompt is embedded in every
+    // output file.
+    const userW = widget(node, USER_PRESETS_W);
+    if (userW) {
+        userW.value = "";
+        userW.serializeValue = () => {
+            const lib = typeIdOf(node);
+            return presetWired(node) && lib ? JSON.stringify(userPresets(lib)) : "";
+        };
+    }
 
     // The preset name is a dropdown of what is stored, plus custom.
     const chooser = asDropdown(node, PRESET,

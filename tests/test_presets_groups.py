@@ -107,9 +107,10 @@ class Disabled(unittest.TestCase):
         self.assertEqual(out["steps"], 4)
         self.assertIsNone(out["refine_amount"])
 
-    def test_disabled_is_the_last_input(self):
+    def test_disabled_comes_after_set(self):
+        # only `user_presets` (for a wired preset, issue #20) came later
         optional = list(presets.ValuePresets.INPUT_TYPES()["optional"])
-        self.assertEqual(optional[-2:], ["set", "disabled"])
+        self.assertEqual(optional[-3:], ["set", "disabled", "user_presets"])
 
 
 if __name__ == "__main__":
