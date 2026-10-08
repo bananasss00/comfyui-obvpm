@@ -17,7 +17,7 @@ import {
     repointLinks, linkById, originOf, derivedFor,
 } from "./obvpm_dynamic.js";
 import { el, iconButton, TEXT, TITLE, DIM, pushButton, textBox,
-         openOverlay } from "./obvpm_ui.js";
+         openOverlay, gripHandle, markRow, sortableRows } from "./obvpm_ui.js";
 import { constantOf, constantOn, findConstantSetter,
          setMode } from "./obvpm_constants.js";
 
@@ -405,8 +405,8 @@ export function openUnbundleConfig(node) {
                + `${shown - MAX_FIELDS} more` : "");
         count.style.color = shown > MAX_FIELDS ? "#e88" : DIM;
         rows.forEach((row, index) => {
-            const shell = rowShell();
-            shell.append(...moveButtons(rows, index, draw));
+            const shell = markRow(rowShell(), index);
+            shell.append(gripHandle(), ...moveButtons(rows, index, draw));
             const check = el("input");
             check.type = "checkbox";
             check.checked = !row.hidden;
@@ -432,6 +432,8 @@ export function openUnbundleConfig(node) {
             if (wired) shell.append(el("span", { color: DIM }, "wired"));
             list.appendChild(shell);
         });
+        // drag by the grip, Alt+Up/Down (issue #19)
+        sortableRows(list, { rows, redraw: draw });
     }
     draw();
 
@@ -520,8 +522,8 @@ export function openBundleConfig(node) {
     function draw() {
         list.replaceChildren();
         rows.forEach((row, index) => {
-            const shell = rowShell();
-            shell.append(...moveButtons(rows, index, draw));
+            const shell = markRow(rowShell(), index);
+            shell.append(gripHandle(), ...moveButtons(rows, index, draw));
             const box = textBox(row.name, "field name",
                                 (v) => { row.name = v; }, "180px");
             shell.append(box);
@@ -531,6 +533,8 @@ export function openBundleConfig(node) {
                             "from " + row.origin));
             list.appendChild(shell);
         });
+        // drag by the grip, Alt+Up/Down (issue #19)
+        sortableRows(list, { rows, redraw: draw });
     }
     draw();
 

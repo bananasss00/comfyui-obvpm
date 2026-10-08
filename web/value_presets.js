@@ -7,7 +7,8 @@ import { api } from "../../scripts/api.js";
 import { el, TEXT, TITLE, INK, DIM, EDGE, FILL, PANEL,
          textBox, pushButton, openOverlay, askText, askConfirm, askChoice, askTextChoice, notice,
          dropWidgetSockets, themePalette, valueTooltip, legacyCanvasBox,
-         NODE_BUTTON, NODE_BUTTON_HOVER } from "./obvpm_ui.js";
+         NODE_BUTTON, NODE_BUTTON_HOVER, gripHandle, markRow,
+         sortableRows } from "./obvpm_ui.js";
 import { trace, listenForPageErrors, loadStarted, loadFinished,
          reportText, copyText } from "./value_presets_diag.js";
 import { STAR, typeIdOf, cleanTypeId, isUserLabel, bareName,
@@ -2373,7 +2374,7 @@ async function openConfig(node, tab = "presets") {
         display: "flex", gap: "5px", color: DIM, font: "12px sans-serif",
         padding: "0 2px",
     });
-    for (const [label, width] of [["", "58px"], ["on", "22px"], ["group", "100px"],
+    for (const [label, width] of [["", "77px"], ["on", "22px"], ["group", "100px"],
                                   ["name", "150px"],
                                   ["type", "200px"], ["range / choices", "160px"],
                                   ["default", "110px"], ["shown when", "160px"],
@@ -2391,6 +2392,15 @@ async function openConfig(node, tab = "presets") {
         color: "#e88", whiteSpace: "pre-wrap", display: "none",
     });
 
+    // The row last worked in: "+ add field" puts the new field under it
+    // (in its group), not at the end of a long list (issue #19).
+    let lastRow = -1;
+    list.addEventListener("focusin", (ev) => {
+        const at = ev.target.closest?.("[data-obvpm-row]");
+        if (at) lastRow = Number(at.dataset.obvpmRow);
+    });
+    const groupKey = (row) => String(row?.group ?? "").trim();
+
     function draw() {
         list.replaceChildren();
         rows.forEach((row, index) => list.appendChild(drawRow(row, index)));
@@ -2398,12 +2408,30 @@ async function openConfig(node, tab = "presets") {
             list.appendChild(el("div", { color: DIM, padding: "8px 2px" },
                                 "No fields yet."));
         }
+        if (lastRow >= rows.length) lastRow = rows.length - 1;
+        // Drag by the grip, Alt+Up/Down; with Shift, the field's whole
+        // group (issue #19). A single field dropped INSIDE another group
+        // -- the fields above and below it share one -- joins it: a
+        // field moved up into the second group is meant to be in it,
+        // and keeping its own would split that group in two headings.
+        sortableRows(list, {
+            rows, redraw: draw, groupOf: groupKey,
+            afterMove: (moved) => {
+                if (moved.length !== 1) return;
+                const i = rows.indexOf(moved[0]);
+                const above = rows[i - 1], below = rows[i + 1];
+                if (above && below && groupKey(above) === groupKey(below)
+                        && groupKey(moved[0]) !== groupKey(above)) {
+                    moved[0].group = above.group;
+                }
+            },
+        });
     }
 
     function drawRow(row, index) {
-        const line = el("div", {
+        const line = markRow(el("div", {
             display: "flex", gap: "5px", alignItems: "center",
-        });
+        }), index);
         const move = (by) => {
             const to = index + by;
             if (to < 0 || to >= rows.length) return;
@@ -2424,6 +2452,9 @@ async function openConfig(node, tab = "presets") {
         group.title = "A heading on the node over this field and the ones "
             + "after it with the same group (a `## group` line in the schema).";
         line.append(
+            gripHandle("Drag to move this field; Shift-drag moves its whole "
+                       + "group. Alt+\u2191/\u2193 moves the field you are typing in "
+                       + "(Alt+Shift: its group)."),
             pushButton("▲", () => move(-1), { padding: "1px 5px" }),
             pushButton("▼", () => move(1), { padding: "1px 5px" }),
             on,
@@ -2740,10 +2771,16 @@ async function openConfig(node, tab = "presets") {
     const schemaTools = el("div", { display: "flex", gap: "6px" });
     schemaTools.append(
         pushButton("+ add field", () => {
-            rows.push({ name: "", kind: "text", ref: "", arg: "", def: "",
-                        when: "", hint: "", on: true,
-                        group: rows.length ? rows[rows.length - 1].group : "" });
+            // under the row last worked in, in its group; else at the end
+            const at = lastRow >= 0 && lastRow < rows.length ? lastRow + 1 : rows.length;
+            rows.splice(at, 0, { name: "", kind: "text", ref: "", arg: "", def: "",
+                                 when: "", hint: "", on: true,
+                                 group: at > 0 ? rows[at - 1].group : "" });
+            lastRow = at;
             draw();
+            const added = list.querySelector(`[data-obvpm-row="${at}"]`);
+            added?.querySelector("input[placeholder=name]")?.focus();
+            added?.scrollIntoView?.({ block: "nearest" });
         }),
         textButton);
     const schemaPane = el("div", {

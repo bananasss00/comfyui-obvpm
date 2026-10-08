@@ -70,6 +70,9 @@ async function load({ fetchApi, confirm } = {}) {
             el: (tag, style, text) => { const n = document.createElement(tag); Object.assign(n.style, style ?? {}); if (text != null) n.textContent = String(text); return n; },
             DIM: "#999", TEXT: "14px sans-serif", TITLE: "600 16px sans-serif", INK: "#ddd", EDGE: "#444", FILL: "#222", PANEL: "#333",
             pushButton: (label, onClick) => { const b = document.createElement("button"); b.textContent = label; b.onClick = onClick; return b; },
+            gripHandle: () => document.createElement("span"),
+            markRow: (element) => element,
+            sortableRows: () => {},
             openOverlay: (width, onClose, opts) => {
                 const o = { overlay: document.createElement("div"), panel: document.createElement("div"),
                             closed: false, dismiss: opts?.dismiss };

@@ -411,9 +411,21 @@ function gearPath() {
         + "A" + hole + " " + hole + " 0 1 0 " + (c + hole) + " " + c + "Z";
 }
 
+// six dots in two columns: the handle a row is dragged by
+function gripPath() {
+    let d = "";
+    for (const x of [5.5, 10.5]) {
+        for (const y of [3.5, 8, 12.5]) {
+            d += "M" + (x + 1.4) + " " + y + "a1.4 1.4 0 1 1 -2.8 0a1.4 1.4 0 1 1 2.8 0z";
+        }
+    }
+    return d;
+}
+
 const ICON_PATHS = {
     gear: gearPath(),
     minus: "M3 7h10v2H3z",
+    grip: gripPath(),
 };
 
 export function icon(name, size = 14) {
@@ -866,4 +878,285 @@ export function valueTooltip(widget, nodeWidth, baseTip, measure, flags) {
     if (!isWidgetValueCutOff(widget, nodeWidth, measure, flags)) return baseTip;
     const full = String(widget.value ?? "");
     return baseTip ? full + "\n\n" + baseTip : full;
+}
+
+// ---------------------------------------------------------------------
+// Reordering rows by dragging, and by Alt+Up / Alt+Down (issue #19)
+// ---------------------------------------------------------------------
+//
+// One helper for every reorderable list in the pack's dialogs (the Bundle
+// fields, the Unbundle outputs, the Value Presets schema, the Message &
+// Links links). A list draws its rows itself, as before; it marks each
+// row element with `markRow(element, index)`, puts a `gripHandle()` in
+// it, and calls `sortableRows(container, ...)` after drawing. A move
+// splices the list's own array and calls its redraw -- the same thing
+// its ▲▼ buttons do, so everything that follows a move (links riding
+// with their fields, renames) is unchanged.
+
+/** The handle a row is dragged by. */
+export function gripHandle(tip) {
+    const grip = el("span", {
+        display: "inline-flex", alignItems: "center", justifyContent: "center",
+        flex: "0 0 auto", width: "14px", height: "22px", cursor: "grab",
+        color: DIM, opacity: "0.8", touchAction: "none", userSelect: "none",
+    });
+    grip.appendChild(icon("grip", 12));
+    grip.dataset.obvpmGrip = "1";
+    grip.title = tip ?? "Drag to move this row. Alt+↑/↓ moves the row you are typing in.";
+    return grip;
+}
+
+/** Mark a drawn row element as row `index` of its list. */
+export function markRow(element, index) {
+    element.dataset.obvpmRow = String(index);
+    return element;
+}
+
+/** The indices of the run of rows around `index` with the same group. */
+function runOf(rows, index, groupOf) {
+    const key = groupOf(rows[index]);
+    let a = index, b = index;
+    while (a > 0 && groupOf(rows[a - 1]) === key) a--;
+    while (b < rows.length - 1 && groupOf(rows[b + 1]) === key) b++;
+    return [a, b];
+}
+
+/**
+ * Move rows[a..b] so they start where row `slot` was (a slot is a gap:
+ * 0 is above the first row, rows.length below the last). Returns the
+ * moved rows, or null when that is where they already are.
+ */
+export function moveBlock(rows, a, b, slot) {
+    if (slot >= a && slot <= b + 1) return null;
+    const moved = rows.splice(a, b - a + 1);
+    const at = slot > b ? slot - moved.length : slot;
+    rows.splice(at, 0, ...moved);
+    return moved;
+}
+
+/** Where a block moves by one step: over the row (or, with `groupOf`,
+ *  the whole run of rows) next to it. A slot, as moveBlock takes. */
+export function stepSlot(rows, a, b, dir, groupOf) {
+    if (dir < 0) {
+        if (a === 0) return null;
+        return groupOf ? runOf(rows, a - 1, groupOf)[0] : a - 1;
+    }
+    if (b === rows.length - 1) return null;
+    return (groupOf ? runOf(rows, b + 1, groupOf)[1] : b + 1) + 1;
+}
+
+/** A one-line text box (not a checkbox, number spinner or text area). */
+function isLineBox(node) {
+    if (node?.tagName !== "INPUT") return false;
+    const type = String(node.type || "text").toLowerCase();
+    return type === "text" || type === "search" || type === "url";
+}
+
+function scrollerOf(node) {
+    for (let n = node; n && n !== document.body; n = n.parentElement) {
+        const style = getComputedStyle(n);
+        if (/(auto|scroll)/.test(style.overflowY) && n.scrollHeight > n.clientHeight) return n;
+    }
+    return null;
+}
+
+/**
+ * Make the marked rows inside `container` reorderable.
+ *
+ * - drag a row by its grip; an insertion line shows where it lands, and
+ *   the list scrolls while the pointer is near its top or bottom edge;
+ *   Escape cancels;
+ * - Alt+Up / Alt+Down moves the row holding the focus by one;
+ * - with `groupOf(row)`: Shift while dragging, or Alt+Shift+Up/Down,
+ *   moves the row's whole group (the run of rows around it with the same
+ *   key) past the next group;
+ * - `afterMove(moved)`: called with the moved rows after the move, before
+ *   the redraw (Value Presets uses it to let a field dropped inside
+ *   another group join it).
+ *
+ * The container may be the same element from draw to draw or a new one
+ * each time: the latest options are the ones used.
+ */
+export function sortableRows(container, { rows, redraw, groupOf, afterMove }) {
+    container.__obvpmSort = { rows, redraw, groupOf, afterMove };
+    if (container.__obvpmSortWired) return;
+    container.__obvpmSortWired = true;
+
+    const rowEls = () => [...container.querySelectorAll("[data-obvpm-row]")]
+        .filter((r) => r.closest("[data-obvpm-sortable]") === container)
+        .sort((x, y) => Number(x.dataset.obvpmRow) - Number(y.dataset.obvpmRow));
+    container.dataset.obvpmSortable = "1";
+
+    function commit(a, b, slot, focusAt) {
+        const opts = container.__obvpmSort;
+        const moved = moveBlock(opts.rows, a, b, slot);
+        if (!moved) return false;
+        opts.afterMove?.(moved);
+        opts.redraw();
+        if (focusAt) {
+            // the same control of the same row, wherever it is now
+            const at = opts.rows.indexOf(moved[focusAt.offset]);
+            const row = [...container.querySelectorAll("[data-obvpm-row]")]
+                .find((r) => Number(r.dataset.obvpmRow) === at);
+            const controls = row ? row.querySelectorAll("input, textarea, select, button") : [];
+            controls[focusAt.control]?.focus?.();
+        }
+        return true;
+    }
+
+    // -- keyboard: Up / Down in a one-line box goes to the box in the same
+    // column of the row above / below, like moving through a table
+    // (a single-line box has nothing of its own to do with those keys)
+    container.addEventListener("keydown", (ev) => {
+        if (ev.altKey || ev.ctrlKey || ev.metaKey || ev.shiftKey
+                || (ev.key !== "ArrowUp" && ev.key !== "ArrowDown")) return;
+        const box = ev.target;
+        if (!isLineBox(box)) return;
+        const row = box.closest?.("[data-obvpm-row]");
+        if (!row || row.closest("[data-obvpm-sortable]") !== container) return;
+        const els = rowEls();
+        const next = els[els.indexOf(row) + (ev.key === "ArrowUp" ? -1 : 1)];
+        if (!next) return;
+        // the column by where it is, not by count: rows need not have the
+        // same boxes (a schema row has a range box only for some types).
+        // Remembered while Up/Down go on, as a text editor remembers its
+        // column: through a row without that box and back into it.
+        const here = box.getBoundingClientRect();
+        const goal = container.__obvpmGoal;
+        const centre = goal && goal.box === box ? goal.x : here.left + here.width / 2;
+        let best = null, bestGap = Infinity;
+        for (const other of next.querySelectorAll("input")) {
+            if (!isLineBox(other) || other.disabled || !other.offsetParent) continue;
+            const r = other.getBoundingClientRect();
+            const gap = Math.abs(r.left + r.width / 2 - centre);
+            if (gap < bestGap) { best = other; bestGap = gap; }
+        }
+        if (!best) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        const caret = box.selectionStart ?? best.value.length;
+        best.focus();
+        container.__obvpmGoal = { box: best, x: centre };
+        try {
+            const at = Math.min(caret, best.value.length);
+            best.setSelectionRange(at, at);
+        } catch (err) {
+            // a box type without a caret
+        }
+        best.scrollIntoView?.({ block: "nearest" });
+    }, true);
+
+    // -- keyboard: Alt+Up / Alt+Down (with Shift: the whole group)
+    container.addEventListener("keydown", (ev) => {
+        if (!ev.altKey || (ev.key !== "ArrowUp" && ev.key !== "ArrowDown")) return;
+        const row = ev.target.closest?.("[data-obvpm-row]");
+        if (!row || row.closest("[data-obvpm-sortable]") !== container) return;
+        const opts = container.__obvpmSort;
+        const index = Number(row.dataset.obvpmRow);
+        const grouped = ev.shiftKey && opts.groupOf;
+        const [a, b] = grouped ? runOf(opts.rows, index, opts.groupOf) : [index, index];
+        const slot = stepSlot(opts.rows, a, b, ev.key === "ArrowUp" ? -1 : 1,
+                              grouped ? opts.groupOf : null);
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (slot == null) return;
+        const control = [...row.querySelectorAll("input, textarea, select, button")]
+            .indexOf(ev.target);
+        commit(a, b, slot, { offset: index - a, control: Math.max(0, control) });
+    }, true);
+
+    // -- dragging by the grip
+    container.addEventListener("pointerdown", (ev) => {
+        const grip = ev.target.closest?.("[data-obvpm-grip]");
+        if (!grip || ev.button !== 0) return;
+        const row = grip.closest("[data-obvpm-row]");
+        if (!row || row.closest("[data-obvpm-sortable]") !== container) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        const opts = container.__obvpmSort;
+        const index = Number(row.dataset.obvpmRow);
+        const grouped = ev.shiftKey && opts.groupOf;
+        const [a, b] = grouped ? runOf(opts.rows, index, opts.groupOf) : [index, index];
+        const dragged = rowEls().filter((r) => {
+            const i = Number(r.dataset.obvpmRow);
+            return i >= a && i <= b;
+        });
+        for (const r of dragged) r.style.opacity = "0.4";
+        const line = el("div", {
+            position: "fixed", height: "2px", background: "var(--p-primary-color, #4a9eff)",
+            pointerEvents: "none", zIndex: "100000", display: "none", borderRadius: "1px",
+        });
+        document.body.appendChild(line);
+        const scroller = scrollerOf(container);
+        let slot = null;
+        let lastY = ev.clientY;
+        let frame = 0;
+        const place = () => {
+            const els = rowEls();
+            if (!els.length) return;
+            slot = els.length;
+            for (const r of els) {
+                const box = r.getBoundingClientRect();
+                if (lastY < box.top + box.height / 2) {
+                    slot = Number(r.dataset.obvpmRow);
+                    break;
+                }
+            }
+            const ref = slot < els.length ? els.find((r) => Number(r.dataset.obvpmRow) === slot) : els.at(-1);
+            const box = ref.getBoundingClientRect();
+            const outer = container.getBoundingClientRect();
+            const y = slot < els.length ? box.top - 2 : box.bottom + 1;
+            const view = scroller?.getBoundingClientRect();
+            const shown = !view || (y >= view.top - 2 && y <= view.bottom + 2);
+            Object.assign(line.style, {
+                display: shown && !(slot >= a && slot <= b + 1) ? "block" : "none",
+                top: y + "px", left: outer.left + "px", width: outer.width + "px",
+            });
+        };
+        // near the top or bottom edge of a scrolling list, scroll it
+        const tick = () => {
+            if (scroller) {
+                const box = scroller.getBoundingClientRect();
+                const edge = 28;
+                const by = lastY < box.top + edge ? -Math.ceil((box.top + edge - lastY) / 3)
+                    : lastY > box.bottom - edge ? Math.ceil((lastY - (box.bottom - edge)) / 3) : 0;
+                if (by) {
+                    scroller.scrollTop += by;
+                    place();
+                }
+            }
+            frame = requestAnimationFrame(tick);
+        };
+        const move = (e) => {
+            lastY = e.clientY;
+            place();
+        };
+        let done = false;
+        const finish = (apply) => {
+            if (done) return;
+            done = true;
+            cancelAnimationFrame(frame);
+            window.removeEventListener("pointermove", move, true);
+            window.removeEventListener("pointerup", up, true);
+            window.removeEventListener("pointercancel", cancel, true);
+            window.removeEventListener("keydown", key, true);
+            line.remove();
+            for (const r of dragged) r.style.opacity = "";
+            if (apply && slot != null) commit(a, b, slot, null);
+        };
+        const up = () => finish(true);
+        const cancel = () => finish(false);
+        const key = (e) => {
+            if (e.key !== "Escape") return;
+            e.preventDefault();
+            e.stopPropagation();
+            finish(false);
+        };
+        window.addEventListener("pointermove", move, true);
+        window.addEventListener("pointerup", up, true);
+        window.addEventListener("pointercancel", cancel, true);
+        window.addEventListener("keydown", key, true);
+        place();
+        frame = requestAnimationFrame(tick);
+    });
 }

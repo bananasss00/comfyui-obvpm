@@ -70,7 +70,8 @@ async function harness(fields = FIELDS) {
                 ...Object.fromEntries(["TEXT", "TITLE", "INK", "DIM", "EDGE", "FILL", "PANEL",
                     "textBox", "pushButton", "openOverlay", "dropWidgetSockets",
                     "askText", "askConfirm", "askChoice", "askTextChoice", "notice", "NODE_BUTTON", "NODE_BUTTON_HOVER",
-                    "nodeButton", "nodeButtonBar", "paintNodeButton"].map((k) => [k, noop])) });
+                    "nodeButton", "nodeButtonBar", "paintNodeButton",
+                    "gripHandle", "markRow", "sortableRows"].map((k) => [k, noop])) });
         } else {
             let source = await readFile(new URL(name, root), "utf8");
             if (name === "value_presets.js") {

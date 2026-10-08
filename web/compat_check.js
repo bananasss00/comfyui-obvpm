@@ -2,7 +2,8 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { el, TEXT, TITLE, INK, DIM, EDGE, FILL, PANEL, pushButton, openOverlay,
          askConfirm, themePalette, dropWidgetSockets, addPanelWidget,
-         nodeButton, nodeButtonBar, paintNodeButton, icon } from "./obvpm_ui.js";
+         nodeButton, nodeButtonBar, paintNodeButton, icon,
+         gripHandle, markRow, sortableRows } from "./obvpm_ui.js";
 
 /**
  * Compatibility Check: the rules, checked.
@@ -955,6 +956,11 @@ function linksTable(items, hooks = {}) {
         remove.title = "Remove this link";
         td.appendChild(remove);
         const order = el("td", { ...CELL, width: "1%", whiteSpace: "nowrap" });
+        const grip = gripHandle();
+        grip.style.verticalAlign = "middle";
+        grip.style.marginRight = "4px";
+        order.appendChild(grip);
+        markRow(tr, items.indexOf(item));
         const up = pushButton("▲", () => hooks.move?.(item, -1), { padding: "1px 5px" });
         const down = pushButton("▼", () => hooks.move?.(item, 1), { padding: "1px 5px", marginLeft: "4px" });
         up.title = "Move up";
@@ -964,6 +970,8 @@ function linksTable(items, hooks = {}) {
         tbody.appendChild(tr);
         item.tr = tr;
     }
+    // drag by the grip, Alt+Up/Down (issue #19)
+    if (hooks.redraw) sortableRows(tbody, { rows: items, redraw: hooks.redraw });
     if (items.length < LINKS_MAX) {
         const add = pushButton("+ Add", () => hooks.add?.(),
                                { alignSelf: "flex-start", padding: "2px 10px", font: "12px sans-serif" });
@@ -1014,6 +1022,7 @@ function openShownPop(overlay, shown, onSave) {
                 draft.push({ text: "", url: "" });
                 drawLinks(true);
             },
+            redraw: () => drawLinks(),
             move: (item, delta) => {
                 const from = draft.indexOf(item), to = from + delta;
                 if (from < 0 || to < 0 || to >= draft.length) return;
