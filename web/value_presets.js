@@ -12,10 +12,12 @@ import { trace, listenForPageErrors, loadStarted, loadFinished,
          reportText, copyText } from "./value_presets_diag.js";
 import { STAR, typeIdOf, cleanTypeId, isUserLabel, bareName,
          userPresets, userPresetsError, loadUserPresets, saveUserPresets,
-         onUserPresetsChange, exportText, parseImport, mergePresets,
+         userFilters, saveUserFilters, onUserPresetsChange, exportText, parseImport, mergePresets,
          pickPresets, exportFileName, download } from "./value_presets_user.js";
 import { constantOn, setMode } from "./obvpm_constants.js";
 import { restoreRows, restoreWrites } from "./value_presets_restore.js";
+import { filterChoices, filterNote, filtersFrom, patternsFrom }
+    from "./value_presets_filter.js";
 
 /**
  * Value Presets: a control per schema field, and named sets of them.
@@ -318,9 +320,18 @@ function buildFromSaved(node) {
  * to the surviving state; the constructor argument does not). Without
  * the assignment, revert and preset-apply repaint nothing.
  */
-export function fieldWidget(node, field, value, onChange) {
+export function fieldWidget(node, field, value, onChange, { filterOf } = {}) {
     const set = (v) => { onChange(field.name, v); };
     const shown = field.error ? field.name + "  ⚠" : field.name;
+    // The user's dropdown filter for this field (config -> Filters):
+    // looked up live by the node and the field's NAME, like the list
+    // itself, so a surviving widget's first closure still answers right.
+    const filter = filterOf ?? (() => userFilters(typeIdOf(node))[field.name]);
+    const listed = () => {
+        const all = node.__obvpmFieldMap?.[field.name]?.choices ?? [];
+        const live = (node.widgets ?? []).find((x) => x[MARK] && x.name === shown);
+        return filterChoices(all, filter(), live ? live.value : undefined);
+    };
     let w, coerced;
     if (field.choices) {
         // A values FUNCTION because litegraph wants one -- and it must
@@ -331,7 +342,7 @@ export function fieldWidget(node, field, value, onChange) {
         // closure answers with this build's list.
         coerced = String(value ?? "");
         w = node.addWidget("combo", shown, coerced, set, {
-            values: () => node.__obvpmFieldMap?.[field.name]?.choices ?? [],
+            values: () => listed().choices,
         });
     } else if (field.kind === "bool") {
         coerced = !!value;
@@ -370,9 +381,14 @@ export function fieldWidget(node, field, value, onChange) {
     // long file name in a narrow node. A getter, not a stored string: the
     // frontend reads widget.tooltip at hover time, and both the value and
     // the node's width change long after this build.
+    // ...and, on a filtered dropdown, how much of the list it shows
+    const tip = () => {
+        const said = field.choices ? filterNote(listed()) : "";
+        return [baseTip, said].filter(Boolean).join("\n\n") || undefined;
+    };
     Object.defineProperty(w, "tooltip", {
         configurable: true,
-        get: () => valueTooltip(w, node.size?.[0] ?? 0, baseTip),
+        get: () => valueTooltip(w, node.size?.[0] ?? 0, tip()),
         set: () => {},
     });
     return w;
@@ -1942,6 +1958,8 @@ function presetsPane(node, overlay, say) {
 
     return {
         element: pane,
+        // the id as typed on this page, for the Filters page
+        typeId: () => cleanTypeId(String(typeId ?? "").trim()),
         async apply() {
             const typed = String(typeId ?? "").trim();
             const lib = cleanTypeId(typed);
@@ -1960,6 +1978,149 @@ function presetsPane(node, overlay, say) {
             if (keep.length) node.properties[HIDDEN_PROP] = keep;
             else delete node.properties[HIDDEN_PROP];
             if (lib) await loadUserPresets(lib);
+            return null;
+        },
+    };
+}
+
+/**
+ * The Filters page: the user's own short list of each dropdown field --
+ * include and exclude patterns per field, kept with the user presets of
+ * the Preset Type Id (value_presets_filter.js says what they do and do
+ * not do). `typeIdOf()` is the id as the Presets page has it now, so a
+ * newly typed id is the one filtered.
+ */
+function filtersPane(fields, typeIdOf) {
+    const pane = el("div", { display: "flex", flexDirection: "column", gap: "10px",
+                             overflowY: "auto", padding: "2px", minHeight: "0" });
+    const listable = (fields ?? []).filter((f) => Array.isArray(f.choices) && f.choices.length);
+    pane.append(section("Dropdown filters",
+        hint("Hide the dropdown entries you do not use. A field lists the entries "
+             + "that match ANY include line (all of them when there is none) and NO "
+             + "exclude line. One pattern per line: it matches anywhere in the "
+             + "entry, ignoring case; * stands for anything, and \\ and / are the "
+             + "same (h3/ matches a folder).\n"
+             + "Only the dropdown changes: presets and runs still take every entry, "
+             + "and the value a field holds is always listed. The filters are "
+             + "yours, kept with your user presets, so every node with this "
+             + "Preset Type Id uses them, in every workflow.")));
+    const body = el("div", { display: "flex", flexDirection: "column", gap: "6px" });
+    pane.append(body);
+
+    let lib = null;         // the id the page was drawn for
+    let draft = null;       // {field: {include: text, exclude: text}}
+    let read = "";          // the draft as it was read, to see a change
+    const keyOf = (d) => JSON.stringify(Object.entries(d ?? {}).map(([k, v]) =>
+        [k, patternsFrom(v.include), patternsFrom(v.exclude)]));
+
+    const COLS = "150px minmax(0, 1fr) minmax(0, 1fr) 120px";
+    function rowOfField(f) {
+        const d = draft[f.name];
+        const line = el("div", { display: "grid", gridTemplateColumns: COLS, gap: "6px",
+                                 alignItems: "start" });
+        const name = el("div", { padding: "5px 0", overflow: "hidden", textOverflow: "ellipsis",
+                                 whiteSpace: "nowrap" }, f.name);
+        name.title = f.name;
+        const box = (key, placeholder) => {
+            const area = textArea(d[key], "44px");
+            area.rows = 2;
+            area.placeholder = placeholder;
+            area.addEventListener("input", () => { d[key] = area.value; paintCount(); });
+            return area;
+        };
+        const count = el("div", { padding: "5px 0", font: "12px sans-serif" });
+        const preview = el("div", {
+            gridColumn: "2 / 5", display: "none", color: DIM, font: "12px monospace",
+            whiteSpace: "pre", overflow: "auto", maxHeight: "140px",
+            border: "1px solid " + EDGE, borderRadius: "4px", padding: "4px 8px",
+        });
+        const toggle = el("span", { color: DIM, cursor: "pointer", textDecoration: "underline",
+                                    marginLeft: "6px" }, "list");
+        toggle.addEventListener("click", () => {
+            preview.style.display = preview.style.display === "none" ? "block" : "none";
+            paintCount();
+        });
+        const said = el("span");
+        count.append(said, toggle);
+        function paintCount() {
+            const r = filterChoices(f.choices, {
+                include: patternsFrom(d.include), exclude: patternsFrom(d.exclude) });
+            said.textContent = r.ignored ? "matches none: all " + r.total
+                : r.shown + " of " + r.total;
+            said.style.color = r.ignored ? "#e8a86c" : (r.shown < r.total ? INK : DIM);
+            said.title = r.ignored
+                ? "No entry passes, so the filter is not applied: the dropdown lists all."
+                : "";
+            if (preview.style.display !== "none") preview.textContent = r.choices.join("\n");
+        }
+        paintCount();
+        line.append(name, box("include", "all"), box("exclude", "none"), count, preview);
+        return line;
+    }
+
+    async function refresh() {
+        const id = typeIdOf();
+        if (draft && id === lib) return;
+        lib = id;
+        draft = null;
+        body.replaceChildren();
+        if (!listable.length) {
+            body.append(hint("This schema has no dropdown fields."));
+            return;
+        }
+        if (!id) {
+            body.append(hint("The filters are kept with your user presets, so they "
+                             + "need a Preset Type Id: set one on the Presets page."));
+            return;
+        }
+        body.append(hint("Loading ..."));
+        await loadUserPresets(id);
+        if (typeIdOf() !== id || lib !== id) return;    // changed meanwhile
+        body.replaceChildren();
+        const problem = userPresetsError(id);
+        if (problem) {
+            body.append(hint(problem + " -- the filters cannot be changed until it can be read."));
+            return;
+        }
+        const stored = userFilters(id);
+        draft = Object.create(null);
+        for (const f of listable) {
+            draft[f.name] = { include: (stored[f.name]?.include ?? []).join("\n"),
+                              exclude: (stored[f.name]?.exclude ?? []).join("\n") };
+        }
+        read = keyOf(draft);
+        const head = el("div", { display: "grid", gridTemplateColumns: COLS, gap: "6px",
+                                 color: DIM, font: "12px sans-serif" });
+        for (const label of ["field", "include (any of)", "exclude", "listed"]) {
+            head.append(el("div", {}, label));
+        }
+        body.append(head, ...listable.map(rowOfField),
+                    hint("Saved in user/default/obvpm/presets/" + id + ".json, beside "
+                         + "your user presets, on Apply."));
+    }
+
+    return {
+        element: pane,
+        refresh,
+        async apply() {
+            if (!draft || keyOf(draft) === read) return null;
+            if (lib !== typeIdOf()) {
+                return "The Preset Type Id changed after the filters were edited: "
+                    + "look at the Filters page again, then Apply.";
+            }
+            // the fields of this schema as edited; any other field's
+            // filters (another schema under the same id) are kept
+            const next = Object.assign(Object.create(null), userFilters(lib));
+            for (const [field, d] of Object.entries(draft)) {
+                next[field] = { include: patternsFrom(d.include), exclude: patternsFrom(d.exclude) };
+            }
+            try {
+                await saveUserFilters(lib, filtersFrom(next));
+            } catch (err) {
+                return "The filters were not saved: " + String(err?.message ?? err);
+            }
+            read = keyOf(draft);
+            app.graph?.setDirtyCanvas?.(true, true);
             return null;
         },
     };
@@ -2409,8 +2570,10 @@ async function openConfig(node, tab = "presets") {
     });
     schemaPane.append(columns, list, error, schemaTools);
     const presets = presetsPane(node, overlay, say);
+    const filters = filtersPane(answer.fields, presets.typeId);
     const setter = setPane(node);
-    const pages = { schema: schemaPane, presets: presets.element, set: setter.element };
+    const pages = { schema: schemaPane, presets: presets.element,
+                    filters: filters.element, set: setter.element };
     // the pages as one segmented toggle: a track with the chosen segment
     // filled, like the frontend's own on/off toggles
     const tabs = {};
@@ -2420,6 +2583,7 @@ async function openConfig(node, tab = "presets") {
     });
     toggle.setAttribute("role", "tablist");
     function show(which) {
+        if (which === "filters") void filters.refresh();
         for (const [key, page] of Object.entries(pages)) {
             const on = key === which;
             page.style.display = on ? "flex" : "none";
@@ -2432,7 +2596,8 @@ async function openConfig(node, tab = "presets") {
             t.setAttribute("aria-selected", on ? "true" : "false");
         }
     }
-    for (const [key, label] of [["presets", "Presets"], ["schema", "Schema"], ["set", "Set"]]) {
+    for (const [key, label] of [["presets", "Presets"], ["schema", "Schema"],
+                                ["filters", "Filters"], ["set", "Set"]]) {
         const t = el("button", {
             border: "none", borderRadius: "4px", padding: "4px 14px",
             font: TEXT, cursor: "pointer", background: "transparent", color: DIM,
@@ -2461,7 +2626,8 @@ async function openConfig(node, tab = "presets") {
                 show("schema");
                 return;
             }
-            const problem = (await presets.apply()) || setter.apply();
+            const problem = (await presets.apply()) || (await filters.apply())
+                || setter.apply();
             if (problem) {
                 say(problem);
                 return;
@@ -2488,7 +2654,7 @@ async function openConfig(node, tab = "presets") {
         }, { fontWeight: "600" }),
     );
 
-    panel.append(title, schemaPane, presets.element, setter.element, footer);
+    panel.append(title, schemaPane, presets.element, filters.element, setter.element, footer);
     draw();
     show(pages[tab] ? tab : "presets");
     document.body.appendChild(overlay);

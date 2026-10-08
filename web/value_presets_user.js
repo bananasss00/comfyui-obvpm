@@ -23,6 +23,7 @@
 // node stores.
 
 import { api } from "../../scripts/api.js";
+import { filtersFrom } from "./value_presets_filter.js";
 
 export const STAR = "★ ";
 const DIR = "obvpm/presets/";
@@ -94,7 +95,8 @@ function changed(name) {
 function entry(name) {
     let e = libs.get(name);
     if (!e) {
-        e = { presets: Object.create(null), loaded: false, loading: null, error: null };
+        e = { presets: Object.create(null), filters: Object.create(null),
+              loaded: false, loading: null, error: null };
         libs.set(name, e);
     }
     return e;
@@ -104,6 +106,12 @@ function entry(name) {
  *  until the first load lands). */
 export function userPresets(name) {
     return name ? entry(name).presets : Object.create(null);
+}
+
+/** The user's dropdown filters kept with these user presets (sync, like
+ *  userPresets): {field: {include, exclude}}. */
+export function userFilters(name) {
+    return name ? entry(name).filters : Object.create(null);
 }
 
 export function userPresetsError(name) {
@@ -121,6 +129,7 @@ export async function loadUserPresets(name, { fresh = false } = {}) {
             const resp = await api.getUserData(DIR + name + ".json");
             if (resp.status === 404) {
                 e.presets = Object.create(null);
+                e.filters = Object.create(null);
                 e.error = null;
             } else if (resp.status !== 200) {
                 e.error = "could not read the user presets (" + resp.status + ")";
@@ -129,6 +138,7 @@ export async function loadUserPresets(name, { fresh = false } = {}) {
                 if (text.length > MAX_BYTES) throw new Error("the user presets file is larger than 1 MB");
                 const data = JSON.parse(text);
                 e.presets = presetsFrom(data?.presets);
+                e.filters = filtersFrom(data?.filters);
                 e.error = null;
             }
         } catch (err) {
@@ -143,21 +153,45 @@ export async function loadUserPresets(name, { fresh = false } = {}) {
     return e.loading;
 }
 
-/** Replace the user presets and write the file. */
-export async function saveUserPresets(name, presets) {
-    if (!name) throw new Error("this node has no Preset Type Id (set one in config -> Presets)");
-    const clean = presetsFrom(presets);
-    const body = { format: FORMAT, version: 1, type_id: name, presets: clean };
+/** Write the file: the presets and the filters, both parts every time
+ *  (each save replaces one of them and keeps the other as read). */
+async function writeFile(name, presets, filters) {
+    const body = { format: FORMAT, version: 1, type_id: name, presets };
+    if (Object.keys(filters).length) body.filters = filters;
     const text = JSON.stringify(body, null, 1);
     if (text.length > MAX_BYTES) throw new Error("the user presets would be larger than 1 MB");
     await api.storeUserData(DIR + name + ".json", text, {
         overwrite: true, stringify: false, throwOnError: true, full_info: false,
     });
     const e = entry(name);
-    e.presets = clean;
+    e.presets = presets;
+    e.filters = filters;
     e.loaded = true;
     e.error = null;
     changed(name);
+}
+
+/** Read the file before a write that keeps part of it: never write over
+ *  what could not be read. */
+async function readBeforeWrite(name) {
+    const e = entry(name);
+    if (!e.loaded || e.error) await loadUserPresets(name, { fresh: !!e.error });
+    if (e.error) throw new Error(e.error + " -- not saved, so nothing in it is lost");
+    return e;
+}
+
+/** Replace the user presets and write the file (its filters kept). */
+export async function saveUserPresets(name, presets) {
+    if (!name) throw new Error("this node has no Preset Type Id (set one in config -> Presets)");
+    const e = await readBeforeWrite(name);
+    await writeFile(name, presetsFrom(presets), e.filters);
+}
+
+/** Replace the dropdown filters and write the file (its presets kept). */
+export async function saveUserFilters(name, filters) {
+    if (!name) throw new Error("this node has no Preset Type Id (set one in config -> Presets)");
+    const e = await readBeforeWrite(name);
+    await writeFile(name, e.presets, filtersFrom(filters));
 }
 
 // ---------------------------------------------------------------------

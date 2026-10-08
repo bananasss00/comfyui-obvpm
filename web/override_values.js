@@ -32,6 +32,7 @@ import { api } from "../../scripts/api.js";
 import { widget, bundleSourceFor, packerOf, syncSockets, hideWidget,
          originOf, linkById, notifyVue, switchInputs, staticInput } from "./obvpm_dynamic.js";
 import { describe, fieldWidget, presetsListeners } from "./value_presets.js";
+import { typeIdOf, userFilters } from "./value_presets_user.js";
 import { addConfigButton } from "./obvpm_bundle_config.js";
 import { el, TEXT, TITLE, DIM, pushButton, openOverlay } from "./obvpm_ui.js";
 import { constantOf, constantOn, isOurGetter, isOurSetter, isUnbundle, setMode }
@@ -219,6 +220,19 @@ async function traceSource(node) {
     };
 }
 
+/**
+ * The user's dropdown filter for a field, as on the Value Presets nodes
+ * the bundle comes from: their Preset Type Id's filters, when they all
+ * go by one id (read live: the source is traced again on every build).
+ */
+function sourceFilter(node, name) {
+    const from = node.__obvpmOvSource?.presets ?? [];
+    const ids = new Set(from.map(typeIdOf));
+    if (ids.size !== 1) return undefined;
+    const [id] = ids;
+    return id ? userFilters(id)[name] : undefined;
+}
+
 /** Remember the traced kinds (not the choice lists), for a load before
  *  the source can be traced. */
 function remember(node, source) {
@@ -356,7 +370,8 @@ function buildRows(node, source, { fit } = {}) {
         const valueName = VALUE_PREFIX + name;
         node.__obvpmFieldMap[valueName] = { ...field, name: valueName };
         const w = fieldWidget(node, { ...field, name: valueName }, held,
-                              (_n, v) => setValue(node, name, v));
+                              (_n, v) => setValue(node, name, v),
+                              { filterOf: () => sourceFilter(node, name) });
         w[ROW] = true;
         show(w, on);
     }

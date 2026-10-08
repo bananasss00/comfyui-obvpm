@@ -16,8 +16,12 @@ async function load() {
     }, { context });
     const mod = new vm.SourceTextModule(await readFile(new URL("value_presets_user.js", root), "utf8"),
                                         { context, identifier: "value_presets_user.js" });
+    const filter = new vm.SourceTextModule(
+        await readFile(new URL("value_presets_filter.js", root), "utf8"),
+        { context, identifier: "value_presets_filter.js" });
     await mod.link((spec) => {
         if (spec.endsWith("scripts/api.js")) return mock({ api: {} });
+        if (spec === "./value_presets_filter.js") return filter;
         throw new Error("unexpected import " + spec);
     });
     await mod.evaluate();
