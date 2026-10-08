@@ -777,8 +777,11 @@ def describe(schema):
             entry["default"] = field.default()
             missing = field.default_missing()
             if missing:
-                # said on hover, not as an error: the field works
-                entry["hint"] = ((field.hint + "\n\n") if field.hint else "") + (
+                # said on hover, not as an error: the field works. Its own
+                # key, never folded into the hint -- the schema editor
+                # writes the hint back into the schema, and this note is
+                # about THIS machine, not part of what the schema says
+                entry["note"] = (
                     "The schema's default, %r, is not in this list here, so "
                     "the field starts on the first entry." % missing)
         except ValueError as why:

@@ -10,6 +10,7 @@ ComfyUI nodes to save time and keep your workflows tidy. Bundle multiple wires i
 
 - Load Images & Compose: a second output, `extras` (a bundle of the separate images as a list, the selected one, and `images_bundle` with `image_0`, `image_1`, …); layers can be **muted**; a `padding` widget frames the composed image and each separate image; the gap moved into a pill under the Result view; and **presets** keep whole sets of images and settings in your user folder.
 - Value Presets: export and import single presets, to share them -- each preset has a tick in **Export…**, which opens on your user presets when there are any (one ticked preset downloads as a file named after it) and in **Import…** (only the ticked presets of a file come in).
+- Fixed (#21): editing a schema in the table editor (changing a model field's type to `choice`, say) no longer breaks it with a "has no ':'" error when this machine lacks the schema's default file.
 
 ### 0.2.14 (2026-10-05)
 

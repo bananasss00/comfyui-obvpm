@@ -57,8 +57,14 @@ class BorrowedDefaults(unittest.TestCase):
         self.assertEqual(f["choices"], ["h3\\model_a.safetensors", "model_b.safetensors"])
         self.assertEqual(f["default"], "h3\\model_a.safetensors")
         self.assertNotIn("error", f)
-        self.assertIn("'model_c'", f["hint"])
-        self.assertTrue(f["hint"].startswith("the model"))
+        # the note is its own key: the hint is what the schema says, and
+        # the editor writes it back (issue #21)
+        self.assertIn("'model_c'", f["note"])
+        self.assertEqual(f["hint"], "the model")
+
+    def test_a_default_that_is_here_has_no_note(self):
+        (f,) = presets.describe("model: @Unet.unet_name = model_b.safetensors # the model")
+        self.assertNotIn("note", f)
 
     def test_the_run_uses_the_first_entry_too(self):
         packed, _ = presets.resolve("model: @Unet.unet_name = model_c", "{}")

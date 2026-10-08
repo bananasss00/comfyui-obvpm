@@ -181,9 +181,10 @@ function portableDescription(answer) {
     if (answer.fields.some((f) => f.error)) return null;
     return answer.fields.map((f) => {
         if (!f.ref) return f;
-        const { choices, default: _d, hint, ...rest } = f;
-        // the schema's own hint, without the local "not in this list" note
-        return { ...rest, hint: String(hint ?? "").split("\n\nThe schema's default, ")[0] };
+        // without this machine's list, its default, and the local "not in
+        // this list" note (savedAnswer puts all three back)
+        const { choices, default: _d, note, ...rest } = f;
+        return rest;
     });
 }
 
@@ -243,13 +244,13 @@ function savedAnswer(node, schema) {
         const hit = written ? choices.find((c) => String(c) === written) : undefined;
         const fallback = choices.length ? choices[0]
             : ({ int: 0, float: 0.0, bool: false }[f.kind] ?? "");
-        let hint = String(f.hint ?? "");
+        const entry = { ...f, choices, default: hit !== undefined ? hit : fallback };
+        delete entry.note;
         if (written && hit === undefined && choices.length) {
-            hint = (hint ? hint + "\n\n" : "") + "The schema's default, "
-                + pyRepr(written) + ", is not in this list here, so the field "
-                + "starts on the first entry.";
+            entry.note = "The schema's default, " + pyRepr(written)
+                + ", is not in this list here, so the field starts on the first entry.";
         }
-        out.push({ ...f, choices, default: hit !== undefined ? hit : fallback, hint });
+        out.push(entry);
     }
     return { fields: out };
 }
@@ -360,10 +361,10 @@ export function fieldWidget(node, field, value, onChange) {
         // that quietly vanished would look like data loss.
         w.label = w.name;
     }
-    // The schema's hint for the field, and the error if it has one --
-    // both are schema text, shown as text (the tooltip is rendered as
-    // text by the host, never as markup).
-    const baseTip = [field.error, field.hint].filter(Boolean).join("\n\n")
+    // The schema's hint for the field, the error if it has one, and the
+    // note about this machine's list -- shown as text (the tooltip is
+    // rendered as text by the host, never as markup).
+    const baseTip = [field.error, field.hint, field.note].filter(Boolean).join("\n\n")
         || undefined;
     // The full value on hover whenever the widget draws it cut off -- a
     // long file name in a narrow node. A getter, not a stored string: the
@@ -1517,7 +1518,9 @@ function lineOf(row) {
     // the tails in the order the parser takes them off: the hint LAST,
     // so it may say anything
     const when = String(row.when ?? "").trim().replace(/^when\s+/i, "");
-    const hint = String(row.hint ?? "").trim();
+    // ONE line: a line break in the hint would end the field there and
+    // leave the rest as a line of its own that is no field at all
+    const hint = String(row.hint ?? "").replace(/\s*[\r\n]+\s*/g, " ").trim();
     return name + ": " + spec + (def ? " = " + def : "")
         + (when ? " when " + when : "") + (hint ? " # " + hint : "");
 }

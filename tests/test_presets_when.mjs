@@ -407,3 +407,28 @@ test("the editor writes a heading line wherever the group changes", async () => 
     const ended = p.schemaOf([{ ...p.rowOf(ENGINE[1]) }, { ...p.rowOf(ENGINE[0]) }]);
     assert.deepEqual(heads(ended), ["## Schedule", "dual_stage", "##", "steps"]);
 });
+
+// Issue #21: a borrowed list without the schema's default carries a note
+// for the tooltip; the schema editor must never write it into the schema.
+test("the missing-default note shows on hover but stays out of the schema", async () => {
+    const MISSING = { name: "model", kind: "choice", ref: "Unet.unet_name", lo: null, hi: null,
+        span: "", decimals: null, default_text: "gone.safetensors", choices: ["a.safetensors"],
+        default: "a.safetensors", hint: "the model", when: null, when_text: "",
+        note: "The schema's default, 'gone.safetensors', is not in this list here, so the field "
+            + "starts on the first entry." };
+    const { p } = await harness([MISSING]);
+    const node = new Node({ model: "a.safetensors" });
+    await p.rebuild(node, true);
+    await tick();
+    assert.equal(field(node, "model").tooltip, "the model\n\n" + MISSING.note);
+    const row = p.rowOf(MISSING);
+    assert.equal(row.hint, "the model");
+    assert.equal(p.lineOf({ ...row, kind: "choice", arg: "a, b, c", def: "" }),
+                 "model: choice a, b, c # the model");
+});
+
+test("a hint with line breaks is written as one line", async () => {
+    const { p } = await harness();
+    assert.equal(p.lineOf({ name: "x", kind: "int", hint: "one\n\n  two\r\nthree" }),
+                 "x: int # one two three");
+});
