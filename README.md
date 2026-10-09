@@ -8,6 +8,7 @@ ComfyUI nodes to save time and keep your workflows tidy. Bundle multiple wires i
 
 ### Latest HEAD
 
+- Load Image & Crop and Load Images & Compose follow **symlinks and Windows junctions** inside the input folder (a library linked in from another drive), as core's Load Image does; they were refused before.
 - Load Images & Compose: a second output, `extras` (a bundle of the separate images as a list, the selected one, and `images_bundle` with `image_0`, `image_1`, …); layers can be **muted**; a `padding` widget frames the composed image and each separate image; the gap moved into a pill under the Result view; and **presets** keep whole sets of images and settings in your user folder.
 - Value Presets: user presets are kept **one file per preset** (`user/default/obvpm/presets/<preset-type-id>/<name>.json`; older ones move there by themselves), so two browser tabs no longer overwrite each other's presets and presets can be shared as files. **Export…** copies or downloads one preset as that same file; **Import…** opens several at once (and still reads older multi-preset exports).
 - Value Presets: **dropdown filters** -- a new config page, **Filters**, to cut a long dropdown (every model file, say) down to the entries you use: include / exclude patterns per field, saved with your user presets so every node with the same Preset Type Id uses them. Only the dropdown changes; presets and runs still take any entry.
@@ -17,6 +18,7 @@ ComfyUI nodes to save time and keep your workflows tidy. Bundle multiple wires i
 - Drag rows to reorder them (#19) in the Bundle/Unbundle settings, the Value Presets schema table and Message & Links; Alt+↑/↓ moves the row you are typing in, and ↑/↓ in a one-line box goes to the same box in the row above or below; in the schema, Shift-drag or Alt+Shift+↑/↓ moves a whole group, and + add field adds under the row you last worked in.
 - Fixed: reordering a Bundle's fields or an Unbundle's outputs in their settings swapped values between fields or dropped wires on current ComfyUI frontends.
 - Fixed (#21): editing a schema in the table editor (changing a model field's type to `choice`, say) no longer breaks it with a "has no ':'" error when this machine lacks the schema's default file.
+- Fixed (#22): workflows with Load Images & Compose or Load Image & Crop no longer load slowly when the input folder holds thousands of images (listing it is about 80x faster, and Load Images & Compose lists it only when you open its new `＋ from input folder…` picker, which has a search box).
 
 ### 0.2.14 (2026-10-05)
 
@@ -166,7 +168,7 @@ A node with no images outputs `None`, the same as an unconnected optional input,
 
 The node body is a layer strip on the left, a main view on the right, and one info line under both. Drag the divider between the strip and the view to widen the strip; its thumbnails grow with it, and the width is saved with the workflow. Entries keep their size however many layers there are, and the strip scrolls past what fits.
 
-- **Add** an image with the `＋ add image` button (opens a file dialog and uploads), by picking one from the `add` dropdown (a live listing of the input folder, subfolders included), by **dropping image files onto the node**, or by **pasting an image from the clipboard** while the node is selected — each becomes a new layer. Cards dragged from the **Artius browser** work too; one already in the input folder is referenced in place rather than copied.
+- **Add** an image with the `＋ add image` button (opens a file dialog and uploads), by picking one with `＋ from input folder…` (a dialog listing the input folder, subfolders included, with a search box; the folder is read only when you open it), by **dropping image files onto the node**, or by **pasting an image from the clipboard** while the node is selected — each becomes a new layer. Cards dragged from the **Artius browser** work too; one already in the input folder is referenced in place rather than copied.
 
 - **Select** a layer by clicking it in the strip. **Delete** it with the ✕ badge on the layer, or press Delete or Backspace while the pointer is over the node. Up and Down move the selection along the strip. **Reorder** by dragging a layer up or down the strip; the insertion point is drawn as you go.
 

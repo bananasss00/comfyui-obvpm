@@ -9,6 +9,8 @@ hidden "crop" string widget as JSON with normalized coordinates
 import json
 import os
 import math
+import stat
+import time
 
 import numpy as np
 import torch
@@ -19,6 +21,7 @@ import node_helpers
 
 from .image_safety import (image_path, inspect_images, hash_images, bounded_text,
                            finite_number, check_pixels, open_checked_image)
+from . import image_safety
 
 
 def _input_images():
@@ -35,23 +38,102 @@ def _input_images():
     the crop editor's front end already splits it into ?subfolder= and
     ?filename= for its preview.
 
-    Symlinked directories are NOT followed: os.walk's default. A loop
-    there would hang the node list, and the node menu is built often.
+    Symlinks and Windows junctions are followed, folders and files alike,
+    wherever they point (image_path() confines by the path as written,
+    so a library linked in from another drive loads like any other).
+    A folder reached through a link is skipped when its real folder was
+    already walked: a link pointing back up the tree would otherwise
+    hang the node list, and the node menu is built often. Real folders
+    are always walked, so a link never takes a folder's place in the
+    list (it only adds names when it leads somewhere new).
+
+    Cost (issue #22): Load Image & Crop's INPUT_TYPES calls this, and
+    ComfyUI calls INPUT_TYPES twice per page load and several times for
+    every prompt the node is in (validation, building the run, reading
+    inputs); the compose picker calls it when it opens. It used to
+    resolve every file through image_path() -- realpath + stat per file,
+    1.75 s for 10k files on Windows. scandir already carries each entry's
+    type (and, on Windows, its size), so a plain file needs no further
+    system call (a linked file costs one stat, a folder one realpath):
+    the same list in ~20 ms for 10k. And the calls that come in a
+    burst share one walk: a listing is reused for LISTING_TTL seconds,
+    unless the input folder itself changed in between (an upload lands
+    there, and the picker must show it at once). A file added inside a
+    SUBFOLDER can take up to LISTING_TTL to appear.
     """
     root = folder_paths.get_input_directory()
+    try:
+        mtime = os.stat(root).st_mtime_ns
+    except OSError:
+        mtime = None
+    now = time.monotonic()
+    cached = _LISTING
+    if (cached.get("root") == root and cached.get("mtime") == mtime
+            and now - cached.get("at", -LISTING_TTL) < LISTING_TTL):
+        return list(cached["files"])
+    files = _walk_input(root)
+    _LISTING.clear()
+    _LISTING.update(root=root, mtime=mtime, at=now, files=files)
+    return list(files)
+
+
+LISTING_TTL = 2.0
+_LISTING = {}
+
+
+def _walk_input(root):
+    """_input_images' walk, uncached: see there."""
     out = []
-    for dirpath, _subdirs, filenames in os.walk(root):
-        rel_dir = os.path.relpath(dirpath, root)
-        for name in filenames:
-            try:
-                image_path(os.path.relpath(os.path.join(dirpath, name), root))
-            except (ValueError, OSError):
-                continue
-            if rel_dir == os.curdir:
-                out.append(name)
-            else:
-                out.append(os.path.join(rel_dir, name).replace(os.sep, "/"))
+    seen = {os.path.normcase(os.path.realpath(root))}
+    stack = [("", root)]
+    while stack:
+        rel_dir, path = stack.pop()
+        try:
+            entries = os.scandir(path)
+        except OSError:
+            continue
+        linked = []
+        with entries:
+            for entry in entries:
+                rel = entry.name if not rel_dir else rel_dir + "/" + entry.name
+                # names image_path() refuses without touching the disk
+                # (possible on POSIX hosts): a colon reads as an alternate
+                # data stream, a backslash as a separator
+                if ":" in entry.name or "\\" in entry.name or len(rel) > 4096:
+                    continue
+                try:
+                    # is_dir / is_file / stat follow links; for a plain
+                    # entry they answer from the folder read itself
+                    if entry.is_dir():
+                        if entry.is_symlink() or _is_junction(entry):
+                            linked.append((rel, entry.path))
+                        else:
+                            seen.add(os.path.normcase(os.path.realpath(entry.path)))
+                            stack.append((rel, entry.path))
+                        continue
+                    if not entry.is_file():
+                        continue
+                    if entry.stat().st_size > image_safety.MAX_FILE_BYTES:
+                        continue
+                except (ValueError, OSError):
+                    continue
+                out.append(rel)
+        # links after this folder's real subfolders are marked: only one
+        # that leads somewhere not walked yet is followed
+        for rel, path in linked:
+            real = os.path.normcase(os.path.realpath(path))
+            if real not in seen:
+                seen.add(real)
+                stack.append((rel, path))
     return sorted(out)
+
+
+def _is_junction(entry):
+    is_junction = getattr(entry, "is_junction", None)       # Python 3.12+
+    if is_junction is not None:
+        return is_junction()
+    tag = getattr(entry.stat(follow_symlinks=False), "st_reparse_tag", 0)
+    return tag == getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", -1)
 
 
 def _parse_crop(crop, width, height):

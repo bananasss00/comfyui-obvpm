@@ -22,7 +22,7 @@ async function harness() {
     const app = { registerExtension: ext => extensions.push(ext), canvas: {} };
     const api = { apiURL: x => x, fetchApi: async (url, options) => {
         requests.push(url);
-        if (url === "/obvpm/input_images") return { json: async () => ({ files: [] }) };
+        if (url === "/obvpm/input_images") return { ok: true, json: async () => ({ files: ["picked.png"] }) };
         throw new Error("Offline test: no fetch allowed");
     } };
     const context = vm.createContext({ console, TextEncoder, AbortController, Blob, URL, FormData,
@@ -43,6 +43,8 @@ async function harness() {
         else if (name === "obvpm_ui.js") mod = mock({ themePalette: () => ({}), el: noop, icon: noop, iconButton: noop,
             ...Object.fromEntries(["TEXT", "TITLE", "INK", "DIM", "EDGE", "FILL", "PANEL", "textBox", "pushButton", "openOverlay", "dropWidgetSockets", "addPanelWidget", "valueTooltip", "legacyCanvasBox", "askText", "askConfirm", "askChoice", "askTextChoice", "notice", "NODE_BUTTON", "NODE_BUTTON_HOVER", "paintNodeButton", "gripHandle", "markRow", "sortableRows"].map(k => [k, noop])),
             nodeButton: () => fakeElement(), nodeButtonBar: () => fakeElement(),
+            // the input picker: lists the folder only when it opens, then picks
+            askPick: async (_title, load) => (await load()).length ? "picked.png" : null,
             legacyCanvasBox: (ctx, w, h) => [w, h] });
         else if (name === "obvpm_artius.js") mod = mock({ ARTIUS_MIME: "test/artius", ARTIUS_ROUTE_BASE: "/artius", artiusRelativePath: () => null, readArtiusAssets: () => null });
         else if (name === "obvpm_bundle_config.js") mod = mock(Object.fromEntries(["addConfigButton", "applyUnbundleLayout", "hasUnbundleLayout", "openBundleConfig", "openUnbundleConfig"].map(k => [k, noop])));
@@ -128,6 +130,9 @@ test("actual Compose editor refuses oversized persisted data without overwriting
     const persisted = JSON.stringify(Array(65).fill("a.png"));
     const node = new Node(persisted);
     node.onNodeCreated();
+    await tick();
+    // issue #22: creating the node (= loading a workflow) never lists the input folder
+    assert.ok(!h.requests.includes("/obvpm/input_images"));
     assert.equal(node.obvpmAddLayer("b.png"), false);
     await node.obvpmAddFiles([{ name: "c.png", size: 20 }]);
     assert.equal(node.widgets[0].value, persisted);
@@ -136,6 +141,16 @@ test("actual Compose editor refuses oversized persisted data without overwriting
     node.onConfigure();
     assert.equal(node.obvpmAddLayer("a.png"), true);
     assert.equal(JSON.parse(node.widgets[0].value)[0].image, "a.png");
+    // the "from input folder" button: the folder is listed now, and the pick is added
+    const picker = node.widgets.find(w => w.type === "button" && w.name.includes("input folder"));
+    assert.ok(picker, "the picker is a button, not a combo");
+    assert.ok(!node.widgets.some(w => w.type === "combo" && w.name === "add"));
+    picker.callback();
+    for (let k = 0; k < 5; k++) await tick();
+    assert.ok(h.requests.includes("/obvpm/input_images"));
+    assert.equal(JSON.parse(node.widgets[0].value)[1].image, "picked.png");
+    node.widgets[0].value = JSON.stringify(["a.png"]);
+    node.onConfigure();
     h.api.fetchApi = async (url, options) => {
         if (url === "/upload/image") {
             assert.equal(options.body.get("image").name, "normal.png");

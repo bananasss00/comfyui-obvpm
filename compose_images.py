@@ -295,23 +295,48 @@ class LoadImagesCompose:
         return True
 
 
-def _register_routes():
-    """GET /obvpm/input_images -> {"files": [...]} for the layer picker.
+def _input_image_known(name):
+    """Whether `name` is an image file the layers may reference: in the
+    input folder (or annotated output/temp), regular, within the size
+    limit -- image_path()'s own rules -- and an image by its type."""
+    try:
+        image_path(name)
+    except (ValueError, OSError, TypeError):
+        return False
+    return bool(folder_paths.filter_files_content_types([name], ["image"]))
 
-    The editor needs a LIVE list of the input folder (a combo widget's
-    values are a page-load snapshot, so anything uploaded since would be
-    missing), and this node has no combo to re-read via /object_info.
-    One tiny read-only route is cheaper than giving the node a widget it
-    does not otherwise want.
+
+def _register_routes():
+    """The layer picker's two read-only routes.
+
+    GET /obvpm/input_images -> {"files": [...]}: the input folder, asked
+    for only when the "from input folder" picker opens (issue #22: never
+    on node creation or workflow load). A combo's values are a page-load
+    snapshot, so anything uploaded since would be missing; this node has
+    no combo to re-read via /object_info.
+
+    GET /obvpm/input_image_exists?name=<path> -> {"exists": bool}: one
+    file, for an image dropped from the Artius browser -- already in the
+    input folder, it is referenced in place rather than uploaded again,
+    and asking about that one file costs nothing however big the folder.
     """
+    import asyncio
     from server import PromptServer
     from aiohttp import web
 
     @PromptServer.instance.routes.get("/obvpm/input_images")
     async def _input_image_list(_request):
-        files = folder_paths.filter_files_content_types(
-            _input_images(), ["image"])
+        # off the event loop: a big tree on a slow disk must not stall
+        # every other request while it is read
+        files = await asyncio.to_thread(_input_images)
+        files = folder_paths.filter_files_content_types(files, ["image"])
         return web.json_response({"files": files})
+
+    @PromptServer.instance.routes.get("/obvpm/input_image_exists")
+    async def _input_image_exists(request):
+        name = request.rel_url.query.get("name", "")
+        exists = await asyncio.to_thread(_input_image_known, name)
+        return web.json_response({"exists": exists})
 
 
 try:

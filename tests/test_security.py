@@ -73,6 +73,10 @@ class ImageSafetyTests(unittest.TestCase):
         Image.new("RGB", (2, 2)).save(self.outside)
 
     def tearDown(self):
+        # links first, each the link itself and never what it leads to
+        for link in reversed(getattr(self, "_links", [])):
+            if os.path.lexists(link):
+                os.rmdir(link) if os.path.isdir(link) else os.unlink(link)
         self.temp.cleanup()
 
     def test_confined_annotations_and_unsafe_core_unused(self):
@@ -97,14 +101,109 @@ class ImageSafetyTests(unittest.TestCase):
                 with self.assertRaises((ValueError, OSError)):
                     crop.LoadImageCrop().load(name)
 
-    def test_symlink_escape(self):
-        link = self.base / "input" / "escape.png"
+    def _link(self, link, target):
+        """A link inside a root: a Windows junction for a folder (no admin
+        rights needed), else a symlink. False when the host can make
+        neither (symlinks need rights on Windows)."""
+        if os.name == "nt" and target.is_dir():
+            import subprocess
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True)
+            if link.is_dir():
+                self.__dict__.setdefault("_links", []).append(link)
+                return True
         try:
-            link.symlink_to(self.outside)
-        except OSError as exc:
-            self.skipTest("host cannot create symlinks: %s" % exc)
-        with self.assertRaises(ValueError):
-            safety.image_path("escape.png")
+            link.symlink_to(target, target_is_directory=target.is_dir())
+        except OSError:
+            return False
+        self.__dict__.setdefault("_links", []).append(link)
+        return True
+
+    def test_a_link_inside_the_root_is_followed(self):
+        # a library linked into the input folder from elsewhere loads like
+        # any other image, the way core's Load Image treats it
+        library = self.base / "library"
+        (library / "set").mkdir(parents=True)
+        Image.new("RGB", (2, 2)).save(library / "set" / "far.png")
+        followed = 0
+        if self._link(self.base / "input" / "lib", library):
+            self.assertEqual(safety.image_path("lib/set/far.png"),
+                             str(self.base / "input" / "lib" / "set" / "far.png"))
+            followed += 1
+        if self._link(self.base / "input" / "escape.png", self.outside):
+            self.assertEqual(safety.image_path("escape.png"), str(self.base / "input" / "escape.png"))
+            followed += 1
+        if not followed:
+            self.skipTest("host can make no links")
+
+    def test_names_that_leave_the_root_are_refused_even_beside_a_link(self):
+        library = self.base / "library"
+        library.mkdir()
+        Image.new("RGB", (2, 2)).save(library / "far.png")
+        if not self._link(self.base / "input" / "lib", library):
+            self.skipTest("host can make no links")
+        for name in ("lib/../../library/far.png", "../library/far.png", str(library / "far.png"),
+                     "lib/../../outside.png", "lib"):
+            with self.subTest(name=name), self.assertRaises((ValueError, OSError)):
+                safety.image_path(name)
+
+    def test_input_listing_walks_links_and_keeps_real_folders(self):
+        root = self.base / "input"
+        (root / "deep" / "a" / "b").mkdir(parents=True)
+        Image.new("RGB", (2, 2)).save(root / "deep" / "a" / "b" / "c.png")
+        Image.new("RGB", (2, 2)).save(root / "top.png")
+        (root / "notes.txt").write_text("not an image, still a file")
+        (root / "empty").mkdir()
+        (root / "big.png").write_bytes(b"x" * 4000)
+        to_output = self._link(root / "jn_out", self.base / "output")
+        # sorts BEFORE the real folder it leads to, and one leads back up
+        to_nested = self._link(root / "a_alias", root / "nested")
+        to_root = self._link(root / "deep" / "up", root)
+        with patch.object(safety, "MAX_FILE_BYTES", 2000):
+            listed = crop._input_images()
+            for name in listed:
+                safety.image_path(name)      # everything listed loads
+        for name in ("deep/a/b/c.png", "nested/sample.png", "top.png", "notes.txt"):
+            self.assertIn(name, listed)
+        self.assertNotIn("big.png", listed)
+        self.assertEqual(len(listed), len(set(listed)))
+        if to_output:
+            self.assertIn("jn_out/nested/sample.png", listed)
+        if to_nested:
+            self.assertNotIn("a_alias/sample.png", listed)    # the real folder keeps its name
+        if to_root:
+            self.assertFalse([n for n in listed if n.startswith("deep/up/")])   # no loop
+
+    def test_input_listing_resolves_no_plain_file(self):
+        # the cost of issue #22: realpath + stat per file; plain files must
+        # be judged from the directory listing alone
+        Image.new("RGB", (2, 2)).save(self.base / "input" / "top.png")
+        with patch.object(crop, "image_path", side_effect=AssertionError("per-file resolve")):
+            self.assertEqual(crop._input_images(), ["nested/sample.png", "top.png"])
+
+    def test_input_listing_is_shared_for_a_moment(self):
+        # ComfyUI calls INPUT_TYPES several times per prompt: one walk for
+        # the burst, but an upload into the input folder shows at once
+        root = self.base / "input"
+        first = crop._input_images()
+        Image.new("RGB", (2, 2)).save(root / "nested" / "later.png")
+        with patch.object(crop, "_walk_input", side_effect=AssertionError("walked again")):
+            self.assertEqual(crop._input_images(), first)
+        Image.new("RGB", (2, 2)).save(root / "uploaded.png")
+        self.assertIn("uploaded.png", crop._input_images())
+        self.assertIn("nested/later.png", crop._input_images())
+        with patch.object(crop, "LISTING_TTL", 0):
+            (root / "nested" / "later.png").unlink()
+            self.assertNotIn("nested/later.png", crop._input_images())
+
+    def test_one_file_check_for_dropped_images(self):
+        (self.base / "input" / "notes.txt").write_text("text")
+        self.assertTrue(compose._input_image_known("nested/sample.png"))
+        for name in ("missing.png", "../outside.png", str(self.outside), "nested", "", None):
+            with self.subTest(name=name):
+                self.assertFalse(compose._input_image_known(name))
+        with patch.object(folders, "filter_files_content_types",
+                          lambda files, _: [f for f in files if f.endswith(".png")]):
+            self.assertFalse(compose._input_image_known("notes.txt"))
 
     def test_file_and_aggregate_limits_before_open(self):
         with patch.object(safety, "MAX_FILE_BYTES", 1), patch.object(safety.Image, "open", side_effect=AssertionError("must not decode")):
@@ -115,14 +214,6 @@ class ImageSafetyTests(unittest.TestCase):
         with patch.object(safety, "MAX_TOTAL_FILE_BYTES", self.path.stat().st_size), patch.object(safety.Image, "open", side_effect=AssertionError):
             with self.assertRaisesRegex(ValueError, "aggregate"):
                 safety.inspect_images([self.name, self.name])
-
-    def test_realpath_escape_even_when_symlinks_unavailable(self):
-        realpath = os.path.realpath
-        def escaped(path):
-            return str(self.outside) if str(path).endswith("escape.png") else realpath(path)
-        with patch.object(safety.os.path, "realpath", side_effect=escaped):
-            with self.assertRaisesRegex(ValueError, "outside"):
-                safety.image_path("escape.png")
 
     def test_compose_with_no_images_passes_none_on(self):
         # an empty node is not an error: it outputs None, like an unconnected

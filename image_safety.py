@@ -20,10 +20,18 @@ MAX_CANVAS_PIXELS = 32 * 1024 * 1024
 
 
 def image_path(name):
-    """Resolve only regular files confined to input/output/temp (including symlinks).
+    """Resolve only regular files confined to input/output/temp.
 
     Absolute paths are accepted only inside the selected root. Both slash styles
     are checked, even on POSIX, so workflows cannot change meaning across hosts.
+
+    Confined by the path AS WRITTEN, as core ComfyUI's /view and Load Image
+    are: the checks below refuse every way a NAME can leave its root
+    (traversal, UNC, drive and foreign absolute paths, streams), while a
+    symlink or Windows junction that sits INSIDE the root is followed
+    wherever it points -- only someone with the machine's files can place
+    one, and a library linked in from another drive is what it is for.
+    (Resolving links first refused exactly that.)
     """
     if not isinstance(name, str) or not name or len(name) > 4096 or "\0" in name:
         raise ValueError("Invalid image path: expected a nonempty filename (at most 4096 characters)")
@@ -43,13 +51,11 @@ def image_path(name):
         raise ValueError("Invalid image path: drive-relative or foreign absolute path")
     if ":" in tail:
         raise ValueError("Invalid image path: alternate data streams are not allowed")
-    root = os.path.realpath(root)
-    path = os.path.realpath(os.path.join(root, portable))
-    try:
-        confined = os.path.commonpath((root, path)) == root
-    except ValueError:
-        confined = False
-    if not confined:
+    root = os.path.abspath(root)
+    path = os.path.abspath(os.path.join(root, portable))
+    # an absolute name may also be written through the root's real
+    # location (the root itself being a link)
+    if not (_inside(root, path) or _inside(os.path.realpath(root), path)):
         raise ValueError("Invalid image path: file is outside its annotated directory")
     info = os.stat(path)
     if not stat.S_ISREG(info.st_mode):
@@ -57,6 +63,13 @@ def image_path(name):
     if info.st_size > MAX_FILE_BYTES:
         raise ValueError("Image exceeds the 64 MiB input-file limit")
     return path
+
+
+def _inside(root, path):
+    try:
+        return path != root and os.path.commonpath((root, path)) == root
+    except ValueError:              # another drive
+        return False
 
 
 def bounded_text(text, limit=MAX_JSON_BYTES, what="Image JSON"):

@@ -810,6 +810,134 @@ export function askTextChoice(message, choices, { title, placeholder, value } = 
     });
 }
 
+/**
+ * Pick one entry of a list that has to be fetched first: a search box
+ * over the list, filtering as you type. Resolves the chosen string, or
+ * null on Cancel / Escape / a click outside.
+ *
+ * `load` is called when the dialog opens -- not before -- and may be
+ * slow; the dialog says "loading…" meanwhile, and shows the error if it
+ * throws. Every word of the search must appear in an entry (any case,
+ * any order). A click, or ↑/↓ then Enter, picks. Only the first `limit`
+ * matches are drawn (a list of thousands is for searching, not
+ * scrolling), with a line saying how many more there are.
+ */
+export function askPick(title, load, { placeholder, noun = ["entry", "entries"],
+                                       limit = 400, empty } = {}) {
+    return new Promise((resolve) => {
+        let answered = false;
+        const settle = (v) => { if (!answered) { answered = true; resolve(v); } };
+        const { overlay, panel, close } = openOverlay(
+            "min(560px, 94vw)", () => settle(null));
+        let items = null;           // null while loading
+        let shown = [];
+        let sel = 0;
+        let query = "";
+        const box = textBox("", placeholder ?? "search…", (v) => {
+            query = v;
+            sel = 0;
+            draw();
+        }, "100%");
+        const list = el("div", {
+            flex: "1 1 auto", minHeight: "0", maxHeight: "60vh",
+            overflowY: "auto", border: "1px solid " + EDGE,
+            borderRadius: "4px", background: FILL,
+        });
+        const status = el("div", { color: DIM, flex: "1 1 auto" });
+        const foot = el("div", { display: "flex", gap: "6px",
+                                 alignItems: "center", paddingTop: "4px" });
+        foot.append(status, pushButton("Cancel", () => { settle(null); close(); }));
+        if (title) panel.appendChild(el("div", { font: TITLE }, title));
+        panel.append(box, list, foot);
+        const count = (n) => `${n} ${n === 1 ? noun[0] : noun[1]}`;
+        const choose = (value) => { settle(value); close(); };
+
+        function mark() {
+            [...list.children].forEach((row, k) => {
+                if (row.obvpmValue === undefined) return;
+                row.style.background = k === sel ? EDGE : "transparent";
+            });
+            list.children[sel]?.scrollIntoView?.({ block: "nearest" });
+        }
+
+        function draw() {
+            list.replaceChildren();
+            if (items === null) {
+                status.textContent = "loading…";
+                return;
+            }
+            const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+            shown = words.length
+                ? items.filter((s) => {
+                    const low = s.toLowerCase();
+                    return words.every((w) => low.includes(w));
+                })
+                : items;
+            sel = Math.min(sel, Math.max(0, Math.min(shown.length, limit) - 1));
+            shown.slice(0, limit).forEach((value, k) => {
+                const row = el("div", {
+                    padding: "3px 8px", cursor: "pointer", whiteSpace: "nowrap",
+                    overflow: "hidden", textOverflow: "ellipsis",
+                }, value);
+                row.title = value;
+                row.obvpmValue = value;
+                row.addEventListener("mouseenter", () => { sel = k; mark(); });
+                row.addEventListener("click", (ev) => {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    choose(value);
+                });
+                list.appendChild(row);
+            });
+            if (shown.length > limit) {
+                list.appendChild(el("div", { padding: "3px 8px", color: DIM },
+                    `… ${shown.length - limit} more — type to narrow the list`));
+            }
+            if (!items.length) {
+                list.appendChild(el("div", { padding: "3px 8px", color: DIM },
+                    empty ?? `No ${noun[1]}.`));
+            } else if (!shown.length) {
+                list.appendChild(el("div", { padding: "3px 8px", color: DIM },
+                    "Nothing matches."));
+            }
+            status.textContent = words.length
+                ? `${shown.length} of ${count(items.length)}`
+                : count(items.length);
+            mark();
+        }
+
+        box.addEventListener("keydown", (ev) => {
+            const n = Math.min(shown.length, limit);
+            if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+                ev.preventDefault();
+                ev.stopPropagation();
+                if (!n) return;
+                sel = (sel + (ev.key === "ArrowDown" ? 1 : n - 1)) % n;
+                mark();
+            } else if (ev.key === "Enter" && !ev.isComposing) {
+                ev.preventDefault();
+                ev.stopPropagation();
+                if (n) choose(shown[sel]);
+            }
+        });
+
+        document.body.appendChild(overlay);
+        box.focus();
+        draw();
+        Promise.resolve().then(load).then((got) => {
+            if (answered) return;
+            items = Array.isArray(got) ? got.map(String) : [];
+            draw();
+        }, (err) => {
+            if (answered) return;
+            items = [];
+            draw();
+            status.textContent = "Could not load the list: "
+                + String(err?.message ?? err);
+        });
+    });
+}
+
 /** window.alert: resolves when dismissed. */
 export function notice(message, title) {
     return new Promise((resolve) => {

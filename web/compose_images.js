@@ -10,7 +10,7 @@ import { ASPECT_CHOICES, parseAspect, impliedAspectRect, ratioDragRect,
 // notice, not window.alert: Electron (ComfyUI Desktop) is unreliable
 // with native dialogs -- see obvpm_ui.js
 import { themePalette, notice, legacyCanvasBox, dropWidgetSockets, nodeButton,
-         nodeButtonBar, NODE_BUTTON_HOVER, askText, askConfirm } from "./obvpm_ui.js";
+         nodeButtonBar, NODE_BUTTON_HOVER, askText, askConfirm, askPick } from "./obvpm_ui.js";
 import { SETTINGS as PRESET_SETTINGS, cleanName, composePresets,
          composePresetsError, loadComposePresets, savePresetFile,
          deletePresetFile, onComposePresetsChange } from "./compose_presets.js";
@@ -545,7 +545,7 @@ const LIST_ENTRY_H = 46;
 const LIST_SCROLLBAR_W = 3;
 const GUTTER = 6;
 const DIVIDER_GRAB = 3;         // px either side of the gutter that count
-const PICK_PLACEHOLDER = "＋ from input folder…";
+const PICK_LABEL = "＋ from input folder…";
 
 // Thumbnails are shared across every node on the page: the same
 // reference image in two Compose nodes is one download.
@@ -601,22 +601,28 @@ function thumbFor(path, onReady) {
     return entry;
 }
 
-// A live listing of the input folder. A combo's values are a page-load
-// snapshot, so anything uploaded since would be missing from it.
 let activeImports = 0;
-let inputFiles = [];
-let inputFilesAt = 0;
-async function refreshInputFiles() {
-    if (Date.now() - inputFilesAt < 2000) return inputFiles;
-    inputFilesAt = Date.now();
+
+// The input folder's images, fetched only when the "from input folder"
+// picker opens (issue #22: a workflow load, a new node or a drop must not
+// make the server walk a library of thousands).
+async function listInputImages() {
+    const resp = await api.fetchApi("/obvpm/input_images");
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    const data = await resp.json();
+    return Array.isArray(data.files) ? data.files : [];
+}
+
+// Whether one input-relative path is an image already in the input
+// folder -- asked about that file alone, never by listing the folder.
+async function inInputFolder(rel) {
     try {
-        const resp = await api.fetchApi("/obvpm/input_images");
-        const data = await resp.json();
-        if (Array.isArray(data.files)) inputFiles = data.files;
+        const resp = await api.fetchApi(
+            "/obvpm/input_image_exists?name=" + encodeURIComponent(rel));
+        return resp.ok && (await resp.json()).exists === true;
     } catch (e) {
-        // Leave the previous listing in place; the picker still works.
+        return false;   // unsure: copy it in, as for any other file
     }
-    return inputFiles;
 }
 
 async function uploadImage(file) {
@@ -654,13 +660,12 @@ async function artiusAddToNode(node, assets) {
     // Consumed: Artius's own dragend fallback must not re-insert it.
     window.__tsArtiusDraggedAsset = "";
     return node.obvpmRunImport?.(wanted.length, async () => {
-    const known = await refreshInputFiles();
     let importedBytes = 0;
     for (const asset of wanted) {
         const rel = artiusRelativePath(asset);
         // Already under the input folder: reference it in place. No
         // second copy of a file the picker can already list.
-        if (rel && known.includes(rel)) {
+        if (rel && await inInputFolder(rel)) {
             node.obvpmAddLayer?.(rel);
             continue;
         }
@@ -684,7 +689,6 @@ async function artiusAddToNode(node, assets) {
             void notice(`Could not add ${asset.filename}: ${err.message}`);
         }
     }
-    inputFilesAt = 0; // the input listing just changed
     return true;
     });
 }
@@ -1027,7 +1031,6 @@ app.registerExtension({
                         if (state.removed || !canAdd(1)) break;
                         addLayer(await uploadImage(file));
                     }
-                    inputFilesAt = 0;
                 });
             };
 
@@ -1290,26 +1293,20 @@ app.registerExtension({
 
             const addButton = node.addWidget(
                 "button", "＋ add image", null, pickFiles);
+            // Our own picker, not a combo (issue #22): a combo has to hand
+            // litegraph its values the moment it opens, so the list had to
+            // be fetched ahead of time -- on every node creation and
+            // workflow load. A dialog can wait, so the input folder is read
+            // only when someone opens it.
             const pickWidget = node.addWidget(
-                "combo", "add", PICK_PLACEHOLDER,
-                (value) => {
-                    if (value && value !== PICK_PLACEHOLDER) addLayer(value);
-                    pickWidget.value = PICK_PLACEHOLDER;
-                },
-                {
-                    // A values FUNCTION is what keeps this listing live;
-                    // litegraph calls it every time the dropdown opens.
-                    // Stale-while-revalidate, because it has to answer
-                    // synchronously: kick off the refresh, serve what the
-                    // last one returned. (If this ever comes up empty in
-                    // Nodes 2.0, a renderer reading options.values as a
-                    // plain array is the first thing to check -- the
-                    // button and drag & drop still work either way.)
-                    values: () => {
-                        refreshInputFiles();
-                        return [PICK_PLACEHOLDER].concat(inputFiles);
-                    },
-                });
+                "button", PICK_LABEL, null, () => void (async () => {
+                    const name = await askPick(
+                        "Add from the input folder", listInputImages, {
+                            placeholder: "search…", noun: ["image", "images"],
+                            empty: "The input folder has no images.",
+                        });
+                    if (name && !state.removed) addLayer(name);
+                })());
             // Neither control is an input of the node: keep both out of
             // the prompt, or picking a file would look like a changed
             // input and re-run a node whose output is identical.
@@ -2606,7 +2603,6 @@ app.registerExtension({
             };
 
             readLayers();
-            refreshInputFiles();
             void loadComposePresets();
             // A new node is sized before these widgets were added, so it
             // came out shorter than its own content (343 against 374 in
