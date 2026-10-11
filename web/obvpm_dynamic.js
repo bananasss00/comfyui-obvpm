@@ -11,6 +11,7 @@ import { iconButton } from "./obvpm_ui.js";
 import { foldButton, installFold, isFolded, syncFold } from "./obvpm_fold.js";
 import {
     constantOf, isConstantSetter, isOurGetter, isOurSetter, isUnbundle,
+    MODE_BYPASS, MODE_NEVER,
 } from "./obvpm_constants.js";
 
 // User-defined dropdowns without a node per list.
@@ -535,6 +536,148 @@ export function switchInputs(node, slot = 0, depth = 0) {
         return [at >= 0 ? `on_case_${at + 1}` : "fallback"];
     }
     return null;
+}
+
+// ---------------------------------------------------------------------
+// The Unbundle as a front-end node: the per-field cache fix
+// ---------------------------------------------------------------------
+
+// The cache walks a node's ancestors: anything upstream of a node is in
+// its cache key, and one changed widget anywhere up the line resets the
+// node. With Bundle and Unbundle both real, a bundle's whole fan-in is
+// upstream of the Bundle, the Unbundle is downstream of the Bundle, and
+// every consumer of every Unbundle output is downstream of THAT -- so
+// swapping the VAE wired into a packed model/clip/vae graph re-runs the
+// whole generation on the far side, sampler included.
+//
+// The fix here is the other half of what KJNodes' Set and Get already
+// are: when an Unbundle's bundle traces back to a Bundle whose fields
+// this file can read, the node goes virtual. The prompt builder then
+// skips it entirely and asks resolveVirtualOutput for each of its
+// outputs, which answers with the Bundle's own input source for that
+// field -- the serialized prompt carries an ordinary wire from the real
+// source to the consumer, exactly as if Bundle and Unbundle had never
+// been in the graph. ComfyUI's cache invalidates per field: changing one
+// branch re-runs that branch and nothing else. The Bundle itself, with
+// only virtual Unbundles downstream, is no longer an ancestor of any
+// prompt node, so it does not even run.
+//
+// The Bundle stays a real node on purpose: a bundle wire is designed to
+// travel through a Lazy Case Switch, feed Peek Bundle and be packed by
+// Value Presets -- all server-side, all of which keep working unchanged.
+// What makes this safe for every OTHER wiring is the getter below: the
+// node only goes virtual when the whole trace lands on a Bundle this
+// file can read. A switch or a presets packer on the wire, a bundle
+// handed through a Reroute, no bundle at all -- the getter answers
+// false, the node stays the real server node it always was, and unpacks,
+// validates and fills its `in` from a constant exactly as before. Worst
+// case for any wiring this change cannot model is therefore today's
+// behaviour, never a silently empty input.
+
+/** Is this output a whole bundle on one wire? */
+function isBundleWire(origin, slot) {
+    return origin?.outputs?.[slot]?.type === BUNDLE_TYPE;
+}
+
+/**
+ * THE CACHE FIX. What one Unbundle output is, as a prompt reference: the
+ * node and output slot its field's value really comes from.
+ *
+ * Called by the frontend's virtual-node resolver for each real consumer
+ * of this output. The answer points THROUGH the Unbundle at the Bundle's
+ * own input source, named by the field this output carries; the frontend
+ * keeps resolving from there on its own (reroutes, bypassed and muted
+ * nodes, subgraph instances, KJ Set/Get), which keeps every hop's
+ * semantics the core's own. Undefined when the field cannot be had: a
+ * spare socket, a name that is no longer in the bundle, a muted or
+ * bypassed packer, or a field that carries a whole nested bundle (that
+ * is not one link; an Unbundle reads a nested bundle through packerOf
+ * instead). The consumer's input is then simply absent from the prompt,
+ * which is the server's own None for an unconnected field -- and its
+ * message names the input when one was required.
+ */
+export function resolveUnbundleOutput(node, slot) {
+    const out = node?.outputs?.[slot];
+    const field = out ? (out.label || out.localized_name || out.name) : "";
+    // An unlabelled spare ("out_3") or a leftover "(unused)" socket
+    // carries no field.
+    if (!field || /^out_\d+$/.test(field) || /\(unused\)$/.test(field)) {
+        return undefined;
+    }
+    const packer = packerOf(node, "in");
+    if (!packer) return undefined;
+    // A muted or bypassed packer produces nothing: its getters get
+    // nothing, the same loud failure the server-side unpack would raise.
+    if (packer.node.mode === MODE_NEVER
+            || packer.node.mode === MODE_BYPASS) {
+        return undefined;
+    }
+    // The last line wins, because that is what the server's pack does
+    // when a name is listed twice (packed[name] is overwritten going
+    // down the list).
+    let at = packer.names.lastIndexOf(field);
+    if (at < 0) {
+        // The names list not written yet (or cleared): fall back to what
+        // the wires derive right now, so a queue straight after a load
+        // still resolves.
+        at = derivedNames(packer.node, "in_", false).lastIndexOf(field);
+    }
+    if (at < 0 || at >= packer.inputs.length) return undefined;
+    const carrier = packer.inputs[at];
+    if (carrier?.link == null) return undefined;   // unpacks as None
+    const graph = packer.node.graph;
+    const link = linkById(graph, carrier.link);
+    if (!link) return undefined;
+    // The field is fed THROUGH the subgraph's input boundary (the Bundle
+    // lives inside a subgraph and this field arrives from outside it):
+    // continue at the instance node's own input, which is where the wire
+    // really enters. The boundary node is not in the prompt and is not in
+    // the resolver's node map, so an answer pointing at it would abort
+    // the whole prompt build -- the same walk bundleSourceFor uses for
+    // the bundle wire itself.
+    if (fromBoundary(graph, link)) {
+        const instance = instanceOf(graph);
+        const outer = instance?.inputs?.[link.origin_slot];
+        const outerLink = outer
+            ? linkById(instance.graph, outer.link) : null;
+        const outerOrigin = outerLink
+            ? instance.graph.getNodeById?.(outerLink.origin_id) : null;
+        if (!outerOrigin || isUnbundle(outerOrigin)
+                || isBundleWire(outerOrigin, outerLink.origin_slot)) {
+            return undefined;
+        }
+        return { node: outerOrigin, slot: outerLink.origin_slot };
+    }
+    const origin = graph.getNodeById?.(link.origin_id);
+    if (!origin) return undefined;
+    // A field that carries a whole nested bundle has no single source
+    // link either.
+    if (isBundleWire(origin, link.origin_slot)) return undefined;
+    // Anything else answers as-is -- including a Reroute, which the
+    // frontend itself steps through.
+    return { node: origin, slot: link.origin_slot };
+}
+
+/**
+ * Whether this Unbundle can answer its outputs from the front end at
+ * all: true only when its bundle traces, through everything
+ * bundleSourceFor follows, to a Bundle this file can read fields off.
+ *
+ * This is the safety half of the change. Installed as a GETTER on
+ * isVirtualNode rather than a flag, because the right answer depends on
+ * the live wire: the prompt builder reads it per consumer link, and a
+ * stale boolean would either skip a node the server still needs or pack
+ * one the frontend already resolved.
+ */
+export function unbundleIsVirtual(node) {
+    try {
+        return !!packerOf(node, "in");
+    } catch (err) {
+        // A trace that throws resolves nothing: stay real, and the
+        // server unpacks -- the behaviour every graph was built on.
+        console.error("[obvpm-dynamic] bundle trace failed:", err);
+        return false;
+    }
 }
 
 /**
@@ -1478,6 +1621,34 @@ app.registerExtension({
     async beforeRegisterNodeDef(nodeType, nodeData) {
         const spec = DRIVEN[nodeData.name];
         if (!spec) return;
+        // Only the Unbundle carries `trace`. The three hooks below make
+        // it a front-end node WHENEVER its bundle traces back to a Bundle
+        // (unbundleIsVirtual -- see the resolver section above), and a
+        // plain real node everywhere else. `isVirtualNode` is what the
+        // prompt builder reads to skip a node and resolve through it
+        // (resolveVirtualOutput per output); getInputLink must answer
+        // null because it is only reached for a field resolveVirtualOutput
+        // declined -- the base class would follow INPUT slot `slot`
+        // instead, which is meaningless for an output index and would
+        // quietly hand the consumer whatever that finds.
+        if (spec.trace) {
+            const proto = nodeType.prototype;
+            Object.defineProperty(proto, "isVirtualNode", {
+                configurable: true,
+                // A getter has no arguments: the node arrives as `this`.
+                get() { return unbundleIsVirtual(this); },
+            });
+            proto.resolveVirtualOutput = function (slot) {
+                try {
+                    return resolveUnbundleOutput(this, slot);
+                } catch (err) {
+                    console.error("[obvpm-dynamic] could not resolve "
+                                  + "output", slot, err);
+                    return undefined;
+                }
+            };
+            proto.getInputLink = function () { return null; };
+        }
         const max = spec.side
             ? poolSize(nodeData, spec.prefix, spec.side)
             : 0;
