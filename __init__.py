@@ -38,6 +38,7 @@ for _names in (comfy.samplers.SCHEDULER_NAMES, comfy.samplers.KSampler.SCHEDULER
 from .bundle import (
     Bundle,
     BundlePeek,
+    BundleToList,
     UnbundleAuto,
 )
 from .gates import (
@@ -88,6 +89,7 @@ NODE_CLASS_MAPPINGS = {
     "Bundle (obvpm)": Bundle,
     "Unbundle (obvpm)": UnbundleAuto,
     "PeekBundle (obvpm)": BundlePeek,
+    "BundleToList (obvpm)": BundleToList,
     "ValuePresets (obvpm)": ValuePresets,
     "OverrideBundleValues (obvpm)": OverrideBundleValues,
     "LoadImageCrop (obvpm)": LoadImageCrop,
@@ -120,6 +122,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Bundle (obvpm)": "Bundle",
     "Unbundle (obvpm)": "Unbundle",
     "PeekBundle (obvpm)": "Peek Bundle",
+    "BundleToList (obvpm)": "Bundle to List",
     "ValuePresets (obvpm)": "Value Presets",
     "OverrideBundleValues (obvpm)": "Override Bundle Values",
     "LoadImageCrop (obvpm)": "Load Image & Crop",

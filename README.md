@@ -9,7 +9,8 @@ ComfyUI nodes to save time and keep your workflows tidy. Bundle multiple wires i
 ### Latest HEAD
 
 - Load Image & Crop and Load Images & Compose follow **symlinks and Windows junctions** inside the input folder (a library linked in from another drive), as core's Load Image does; they were refused before.
-- Load Images & Compose: a second output, `extras` (a bundle of the separate images as a list, the selected one, and `images_bundle` with `image_0`, `image_1`, …); layers can be **muted**; a `padding` widget frames the composed image and each separate image; the gap moved into a pill under the Result view; and **presets** keep whole sets of images and settings in your user folder.
+- Load Images & Compose: a second output, `extras` (a bundle of the selected image and `images_bundle`, the separate images as `image_0`, `image_1`, …); layers can be **muted**; a `padding` widget frames the composed image and each separate image; the gap moved into a pill under the Result view; and **presets** keep whole sets of images and settings in your user folder.
+- New node, **Bundle to List**: a bundle's values as a ComfyUI list, so the next node runs once per value — Unbundle Load Images & Compose's `extras` and wire `images_bundle` into it to get the layers as a list, each at its own size.
 - Value Presets: user presets are kept **one file per preset** (`user/default/obvpm/presets/<preset-type-id>/<name>.json`; older ones move there by themselves), so two browser tabs no longer overwrite each other's presets and presets can be shared as files. **Export…** copies or downloads one preset as that same file; **Import…** opens several at once (and still reads older multi-preset exports).
 - Value Presets: **dropdown filters** -- a new config page, **Filters**, to cut a long dropdown (every model file, say) down to the entries you use: include / exclude patterns per field, saved with your user presets so every node with the same Preset Type Id uses them. Only the dropdown changes; presets and runs still take any entry.
 - Bundle and Unbundle take up to **128** fields (was 16), so a bundle from any Value Presets node fits one Unbundle.
@@ -90,11 +91,12 @@ Every node in this pack is listed with **(obvpm)** after its name, so searching 
 
 **[Bundles](#bundles-obvpmbundle)** — obvpm/bundle
 
-| Node                        | What it does                      |
-| --------------------------- | --------------------------------- |
-| [Bundle](#bundle)           | Pack several values onto one wire |
-| [Unbundle](#unbundle)       | Expand a bundle back into wires   |
-| [Peek Bundle](#peek-bundle) | Show what is on a bundle wire     |
+| Node                              | What it does                                 |
+| --------------------------------- | -------------------------------------------- |
+| [Bundle](#bundle)                 | Pack several values onto one wire            |
+| [Unbundle](#unbundle)             | Expand a bundle back into wires              |
+| [Peek Bundle](#peek-bundle)       | Show what is on a bundle wire                |
+| [Bundle to List](#bundle-to-list) | Turn a bundle's values into a ComfyUI list   |
 
 **[Compatibility Check](#compatibility-check)** — obvpm/gates
 
@@ -209,9 +211,8 @@ The packer sweeps 48 candidate sheet widths and four placement orders — your l
 
 - `image`: the composed image, every layer that is not muted.
 - `extras`: a bundle — take it apart with Unbundle:
-  - `images`: the layers that are not muted, as a **list** of images, each cropped and padded at its own size (for nodes that take a list);
   - `selected_image`: what is selected in the strip — that layer alone, cropped and padded (even when it is muted), or the composed image when **Result** is selected;
-  - `images_bundle`: the same layers as a bundle of their own, `image_0`, `image_1`, … in list order (an Unbundle on it names them).
+  - `images_bundle`: the layers that are not muted as a bundle of their own, `image_0`, `image_1`, … in list order, each cropped and padded at its own size (an Unbundle on it names them; [Bundle to List](#bundle-to-list) turns them into a list).
 
 Changing any crop, mute, the selection, or the file behind any layer re-executes the node on the next run.
 
@@ -369,6 +370,16 @@ Shows what is actually on a bundle wire: one line per field, with its name and a
 Deliberately a summary rather than a dump: printing a batch of images gives pages of numbers that say nothing about whether the right thing is on the wire, while its shape answers exactly that.
 
 The report is printed on the node itself and is also available as a `text` output. Nothing is unpacked or converted, so it costs nothing to leave wired in, and the last run's report is kept when the workflow is reopened.
+
+### Bundle to List
+
+Turns a bundle into a **ComfyUI list**: every field's value, in the bundle's order, one list item each. The node wired to `list` runs once per item — a Save Image saves each, an upscaler upscales each — and so does everything after it. Keep the list away from a generation unless you mean one run per item.
+
+Made for Load Images & Compose: Unbundle its `extras`, wire `images_bundle` here, and you get its layers as a list, each at its own size (an image batch can't hold pictures of different sizes).
+
+Why a separate node: in ComfyUI a list is something an output socket declares, not something a value is. Unbundle's outputs are the same for every Unbundle, so none of them can be a list; this node's single output is, and shows the list marker.
+
+An empty bundle (every Load Images & Compose layer muted) stops the run with a message saying so, rather than the next node failing with an unclear error.
 
 ### Tracing
 

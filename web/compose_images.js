@@ -2595,7 +2595,7 @@ app.registerExtension({
             // fields of images_bundle, one per layer that is on.
             node.obvpmBundleNames = function (slot, path = []) {
                 if (slot !== 1) return null;
-                if (!path.length) return ["images", "selected_image", "images_bundle"];
+                if (!path.length) return ["selected_image", "images_bundle"];
                 if (path.length === 1 && path[0] === "images_bundle") {
                     return activeLayers().map((_, k) => `image_${k}`);
                 }

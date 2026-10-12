@@ -220,6 +220,56 @@ class UnbundleAuto:
         return tuple(values)
 
 
+class BundleToList:
+    """Bundle to List: a bundle's values, in field order, as a ComfyUI list.
+
+    A list is something an output socket declares (OUTPUT_IS_LIST), not
+    something a value is, so a list cannot ride inside a bundle and come
+    out of an Unbundle as one: Unbundle's outputs are generic, the same for
+    every Unbundle. This node is the one place that declares it, so the
+    list marker shows on its socket and nowhere else.
+    """
+
+    CATEGORY = "obvpm/bundle"
+    FUNCTION = "to_list"
+    RETURN_TYPES = (ANY,)
+    RETURN_NAMES = ("list",)
+    OUTPUT_IS_LIST = (True,)
+    DESCRIPTION = (
+        "Turns a bundle into a list: every field's value, in the bundle's "
+        "order. The node wired to the list runs once per value -- a Save "
+        "Image saves each, an upscaler upscales each -- and so does "
+        "everything after it, so keep the list away from a generation "
+        "unless you mean one run per value. For Load Images & Compose: "
+        "Unbundle its extras and wire images_bundle here to get its layers, "
+        "each at its own size."
+    )
+    OUTPUT_TOOLTIPS = (
+        "The bundle's values, one list item per field, in field order.",)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "in": (BUNDLE, {
+                    "tooltip": "The bundle to turn into a list.",
+                }),
+            },
+        }
+
+    def to_list(self, **kwargs):
+        packed = _as_bundle(kwargs.get("in"), "Bundle to List")
+        if not packed:
+            # An empty list makes ComfyUI call the next node with no inputs
+            # at all, which fails with a "missing argument" error naming
+            # nothing useful -- say what happened instead.
+            raise ValueError(
+                "Bundle to List: the bundle is empty, so there is nothing "
+                "to list. (From Load Images & Compose: every layer is "
+                "muted.)")
+        return (list(packed.values()),)
+
+
 def _describe(value):
     """One short line for a packed value.
 

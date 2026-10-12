@@ -90,11 +90,10 @@ def _padded(tile, padding, fill):
 
 
 def _extras(images, selected):
-    """The `extras` bundle: the separate images as a list and as a bundle
-    of their own (image_0, image_1, ... -- the layers that are on, in list
-    order), and the one the editor has selected."""
+    """The `extras` bundle: the one the editor has selected, and the
+    separate images as a bundle of their own (image_0, image_1, ... -- the
+    layers that are on, in list order)."""
     return {
-        "images": list(images),
         "selected_image": selected,
         "images_bundle": {"image_%d" % i: img for i, img in enumerate(images)},
     }
@@ -157,12 +156,11 @@ class LoadImagesCompose:
         "The composed sheet, one image containing every layer that is not "
         "muted -- or None when there is none, so an unused node can stay "
         "in the workflow.",
-        "A bundle (Unbundle takes it apart): `images`, the layers that are "
-        "not muted as a list, each cropped and padded at its own size; "
-        "`selected_image`, what is selected in the node's list (a layer, "
-        "cropped, or the packed image when Result is selected); and "
-        "`images_bundle`, the same layers as a bundle of their own, "
-        "image_0, image_1, ...",
+        "A bundle (Unbundle takes it apart): `selected_image`, what is "
+        "selected in the node's list (a layer, cropped, or the packed image "
+        "when Result is selected); and `images_bundle`, the layers that are "
+        "not muted as a bundle of their own, image_0, image_1, ..., each "
+        "cropped and padded at its own size.",
     )
 
     @classmethod

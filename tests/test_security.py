@@ -222,8 +222,7 @@ class ImageSafetyTests(unittest.TestCase):
             for empty in ("", "[]", "  "):
                 image, extras = compose.LoadImagesCompose().compose(empty)
                 self.assertIsNone(image)
-                self.assertEqual(extras, {"images": [], "selected_image": None,
-                                          "images_bundle": {}})
+                self.assertEqual(extras, {"selected_image": None, "images_bundle": {}})
 
     def test_compose_preflight_before_loading_any_layer(self):
         with patch.object(compose, "_load_layer", side_effect=AssertionError("no decode")):
@@ -467,30 +466,34 @@ class ComposeExtrasTests(unittest.TestCase):
     def run_node(self, layers, **kw):
         return compose.LoadImagesCompose().compose(json.dumps(layers), max_megapixels=0, **kw)
 
+    def layers(self, extras):
+        return list(extras["images_bundle"].values())
+
     def test_extras_hold_each_layer_at_its_own_size(self):
         image, extras = self.run_node(["red.png", {"image": "green.png", "crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}}])
-        self.assertEqual([tuple(t.shape) for t in extras["images"]], [(1, 16, 32, 3), (1, 16, 8, 3)])
+        # no plain-list field: a list only works declared on a socket (Bundle to List)
+        self.assertEqual(list(extras), ["selected_image", "images_bundle"])
+        self.assertEqual([tuple(t.shape) for t in self.layers(extras)], [(1, 16, 32, 3), (1, 16, 8, 3)])
         self.assertEqual(list(extras["images_bundle"]), ["image_0", "image_1"])
-        self.assertIs(extras["images_bundle"]["image_1"], extras["images"][1])
         self.assertIs(extras["selected_image"], image, "Result selected: the packed image")
-        self.assertEqual(float(extras["images"][1][0, 0, 0, 1]), 1.0)
+        self.assertEqual(float(self.layers(extras)[1][0, 0, 0, 1]), 1.0)
 
     def test_a_muted_layer_is_left_out_and_the_rest_renumbered(self):
         layers = ["red.png", {"image": "green.png", "muted": True}, "blue.png"]
         image, extras = self.run_node(layers)
-        self.assertEqual([tuple(t.shape[1:3]) for t in extras["images"]], [(16, 32), (24, 8)])
+        self.assertEqual([tuple(t.shape[1:3]) for t in self.layers(extras)], [(16, 32), (24, 8)])
         self.assertEqual(list(extras["images_bundle"]), ["image_0", "image_1"])
         # and not in the sheet: no green anywhere in it
         self.assertEqual(float(image[..., 1].max()), 0.0)
         everything_off = [{"image": "red.png", "muted": True}]
         image, extras = self.run_node(everything_off)
         self.assertIsNone(image)
-        self.assertEqual(extras["images"], [])
+        self.assertEqual(extras["images_bundle"], {})
 
     def test_the_selection_is_what_selected_image_is(self):
         layers = ["red.png", {"image": "green.png", "muted": True}, "blue.png"]
         _image, extras = self.run_node(layers, selected=2)
-        self.assertIs(extras["selected_image"], extras["images"][1])
+        self.assertIs(extras["selected_image"], extras["images_bundle"]["image_1"])
         # a muted layer can still be selected and taken alone
         _image, extras = self.run_node(layers, selected=1)
         self.assertEqual(tuple(extras["selected_image"].shape), (1, 16, 16, 3))
@@ -510,7 +513,7 @@ class ComposeExtrasTests(unittest.TestCase):
         # every side keeps at least the padding of background
         for edge in (image[0, :5], image[0, -5:], image[0, :, :5], image[0, :, -5:]):
             self.assertEqual(float(edge.min()), 1.0)
-        red = extras["images"][0]
+        red = extras["images_bundle"]["image_0"]
         self.assertEqual(tuple(red.shape), (1, 26, 42, 3))
         self.assertEqual(float(red[0, 0, 0].min()), 1.0)          # the padding
         self.assertEqual(tuple(red[0, 5, 5].tolist()), (1.0, 0.0, 0.0))
