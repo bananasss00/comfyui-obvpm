@@ -6,7 +6,7 @@ ComfyUI nodes to save time and keep your workflows tidy. Bundle multiple wires i
 
 **Also check out my new Timeline node:**  https://github.com/chanon/comfyui-obvpm-timeline It not only lets you extend videos seamlessly, but also **prepend, bridge and even create seamless loops with motion context**!
 
-### Latest HEAD
+### 0.2.15 (2026-10-12)
 
 - Load Image & Crop and Load Images & Compose follow **symlinks and Windows junctions** inside the input folder (a library linked in from another drive), as core's Load Image does; they were refused before.
 - Load Images & Compose: a second output, `extras` (a bundle of the selected image and `images_bundle`, the separate images as `image_0`, `image_1`, …); layers can be **muted**; a `padding` widget frames the composed image and each separate image; the gap moved into a pill under the Result view; and **presets** keep whole sets of images and settings in your user folder.
@@ -28,17 +28,27 @@ ComfyUI nodes to save time and keep your workflows tidy. Bundle multiple wires i
 - Mute Group If no longer shows a status line ("running …" / "muting …") under its widgets, and a new one is no taller than its two widgets.
 - New, for other packs: a node of another pack can set a bundle constant itself (`obvpmConstantWidget`) and name its fields for Unbundle.
 - Fixed: a Mute Group If subgraph pasted into a second group works in both (both groups stayed on).
-
-### 0.2.12 (2026-10-04)
-
 - Value Presets: a node that reads a constant by name, with no Get node in between (a node offering `obvpmConstantRead()`), now counts as reading it. Before, a value whose only reader was such a node seemed to go nowhere, so the presets feeding it faded although they were used.
-
-### 0.2.11 (2026-10-02)
-
 - New: **Mute Group If** mutes the group it sits in while its `mute` value is true (or false, with `invert`): every node in the frame is set to Never, so it is left out of the run -- nothing in it starts, loaders included -- and shows greyed, and it comes back when the value turns. The value is read before the run, as the switches read theirs (a widget, a Value Presets field, a primitive, the timeline's upscale toggle); one it cannot tell leaves the group on. Only nodes it muted are unmuted again, and a node covered by several stays muted while any of them wants it. Value Presets fades follow it at once: a preset read only by muted nodes fades too. See [Mute Group If](#mute-group-if).
 - Value Presets: a preset read only by a node that never runs -- one with no outputs that is not an output node, such as a display-only preview -- now fades like an unused one; before, wiring such a display node kept it lit.
 - Value Presets: **headings** — a `## Title` line in the schema puts a heading over the fields below it, so long settings read in groups (in the config dialog it is the new **group** column). A heading hides while every field under it does.
 - Value Presets: **fields switched off per node** — the config dialog's new **on** column. Nodes sharing one schema (and one set of presets) need not all use every field: a field switched off is hidden on that node and `None` on its bundle, and the fields it decides still see it at its default (a field shown `when` the switched-off one has its default value keeps showing). Override Bundle Values downstream keeps it off.
+- Value Presets: works with the timeline's **load settings** ([comfyui-obvpm-timeline](https://github.com/chanon/comfyui-obvpm-timeline)): each changed value is its own row; a changed schema, and each workflow preset that differs, is one row, unticked by default, with what changed inside it behind a collapsed toggle.
+- Value Presets: the **schema** button is now **config**, with three pages: Presets, Schema (as before) and Set.
+- Value Presets: **user presets** — presets kept in your user folder under the node's **Preset Type Id**, shared by every workflow whose node has the same id, so your presets survive a new version of a workflow. The workflow's own presets can be hidden from the chooser. See [Value Presets](#value-presets).
+- Value Presets: nodes with the same Preset Type Id also **share their workflow presets** within a workflow.
+- Value Presets: **export / import** presets as a small JSON file, to move them between workflows or share them.
+- Value Presets: **set to constant**, like a Bundle's set — an Unbundle with get or a KJNodes Get reads the bundle by name, without a wire. Turned on in config; the name is the node's **set_constant** field.
+- Value Presets: a borrowed dropdown whose default is not on this install keeps its dropdown (starting on the first entry) instead of turning into a text field.
+- Value Presets: fields show **as the workflow opens**, not after it has finished loading — the node keeps the last description of its schema with the workflow (a few KB) and builds from it at once, while the server is still asked and wins if it answers differently. A borrowed dropdown's list, and anything taken from it, is never saved: it is read from the browser's own node definitions, so no model or LoRA file names travel in a shared workflow.
+- Value Presets: a node **not used by the next run** fades — when every path from it ends at a switch that will pick another branch, or at nodes a Mute If gate will block, and that is known before the run (a switch's or gate's own setting, a preset value, or the timeline's upscale toggle: while generating, the upscale engine settings and upscale options fade; while upscaling, the generation engine settings). A new or unwired node, or one behind a switch or gate decided at run time, looks as usual. Only the look changes; the node still edits.
+- New node: **Override Bundle Values** — override some of a bundle's values (typically a Value Presets node's) per run, with the preset's own ranges and choices, or by wiring in a value no widget can hold. The Value Presets node marks the fields that are overridden downstream. See [Override Bundle Values](#override-bundle-values).
+- Fixed: Load Images & Compose ignored an image list set from outside the node -- e.g. the timeline's "load settings" restoring a take -- and kept showing (and on the next edit wrote back) its old list. It now re-reads the list whenever it changes.
+
+### 0.2.9 (2026-09-26)
+
+- Value Presets: fixed the node staying blank ("still waiting for the schema from the server") in workflows where something keeps the canvas redrawing, such as a pack with animated links or live monitors (issue #12). Each redraw asked for the fields again while the answer was on its way, and the answer was then thrown away as out of date, over and over.
+- Value Presets: fixed a false red "its graph holds ANOTHER node under id …" line over preset nodes after a workflow was loaded again (or undone, or its tab switched) while the nodes were still starting up. It came from the node the load replaced, not the one on screen, and showed whenever the node was not selected.
 
 ## YouTube Intro Videos
 

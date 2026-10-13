@@ -2,7 +2,7 @@
 
 Changes not yet in a release are listed under **Latest HEAD**; they become a numbered version when the pack is released.
 
-## Latest HEAD
+## 0.2.15 (2026-10-12)
 
 - Load Image & Crop and Load Images & Compose: **symlinks and Windows junctions** inside the input folder are followed -- a library linked in from another drive lists and loads like any other folder, as with core's Load Image. Before, an image reached through a link that pointed outside the input folder was refused ("outside its annotated directory") and such folders were left out of the lists. Paths are now checked as written: `..`, absolute, drive, UNC and stream paths still cannot leave the input (or output/temp) folder. The input listing walks each real folder once, so a link pointing back up the tree neither loops nor lists the same images twice, and a link never takes a real folder's place in the list.
 - Load Images & Compose: a second output, **`extras`**, a bundle: `selected_image` (the layer selected in the strip, cropped -- or the composed image while Result is selected) and `images_bundle` (the layers as a bundle of their own, `image_0`, `image_1`, ..., each cropped at its own size; Bundle to List turns them into a list). An Unbundle on `extras` names its fields, and an Unbundle on `images_bundle` names those (Unbundle now follows a bundle that another pack's node nested inside its own: `node.obvpmBundleNames(slot, path)`). Existing wires on `image` are unchanged.
@@ -30,24 +30,12 @@ Changes not yet in a release are listed under **Latest HEAD**; they become a num
 - Mute Group If: no status line ("running …" / "muting …" / "value not known before the run …") under its widgets any more -- the greyed group already says it, and the line made every switch a row taller. Its status is still kept for diagnostics (`node.__obvpmMuteStatus`). And a new one is exactly as tall as its two widgets: it has no outputs and its inputs are the widgets' own sockets, but litegraph sized it for one more slot row, which sat empty under them (classic renderer).
 - New, for other packs: a node of another pack can **set a bundle constant itself**, always on: its class names the widget holding the name (`prototype.obvpmConstantWidget = "<widget>"`) and puts a bundle on its output 0. Such a node keeps its own title, takes part in the unique names, paste renames, **Add Unbundle (get)** and the KJNodes interop like a setting Bundle, and an empty name sets nothing. It can also name its bundle's fields for the Unbundles that take them apart (`node.obvpmBundleNames(slot)`) and say what a field holds before a run (`node.obvpmBundleValue(field)`), which the switches, Mute Group If and the presets' fades read through the Unbundle.
 - Fixed: a switch subgraph used in more than one place -- the same Mute Group If subgraph pasted into a second group, say -- read "value not known before the run" and left every group it switches on. A Get inside a subgraph found its Set only when the subgraph was used exactly once; it now climbs out of every place it is used, and answers when they all reach the same Set (still not when they could differ).
-
-## 0.2.12 (2026-10-04)
-
 - Value Presets: a node that reads a constant by name, with no Get node in between (a node offering `obvpmConstantRead()`), now counts as reading it. Before, a value whose only reader was such a node seemed to go nowhere, so the presets feeding it faded although they were used.
-
-## 0.2.11 (2026-10-02)
-
 - New: **Mute Group If** mutes the group it sits in while its `mute` value is true (or false, with `invert`): every node in the frame is set to Never, so it is left out of the run -- nothing in it starts, loaders included -- and shows greyed, and it comes back when the value turns. The value is read before the run, as the switches read theirs (a widget, a Value Presets field, a primitive, the timeline's upscale toggle); one it cannot tell leaves the group on. Only nodes it muted are unmuted again, and a node covered by several stays muted while any of them wants it. Value Presets fades follow it at once: a preset read only by muted nodes fades too. See [Mute Group If](README.md#mute-group-if).
 - Value Presets: a preset read only by a node that never runs -- one with no outputs that is not an output node, such as a display-only preview -- now fades like an unused one; before, wiring such a display node kept it lit.
 - Value Presets: **headings** — a `## Title` line in the schema puts a heading over the fields below it, so long settings read in groups (in the config dialog it is the new **group** column). A heading hides while every field under it does.
 - Value Presets: **fields switched off per node** — the config dialog's new **on** column. Nodes sharing one schema (and one set of presets) need not all use every field: a field switched off is hidden on that node and `None` on its bundle, and the fields it decides still see it at its default (a field shown `when` the switched-off one has its default value keeps showing). Override Bundle Values downstream keeps it off.
-
-## 0.2.10-preview.2 (2026-09-28)
-
 - Value Presets: works with the timeline's **load settings** ([comfyui-obvpm-timeline](https://github.com/chanon/comfyui-obvpm-timeline)): each changed value is its own row; a changed schema, and each workflow preset that differs, is one row, unticked by default, with what changed inside it behind a collapsed toggle.
-
-## 0.2.10-preview.1 (2026-09-28)
-
 - Value Presets: the **schema** button is now **config**, with three pages: Presets, Schema (as before) and Set.
 - Value Presets: **user presets** — presets kept in your user folder under the node's **Preset Type Id**, shared by every workflow whose node has the same id, so your presets survive a new version of a workflow. The workflow's own presets can be hidden from the chooser. See [Value Presets](README.md#value-presets).
 - Value Presets: nodes with the same Preset Type Id also **share their workflow presets** within a workflow.
