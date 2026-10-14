@@ -337,7 +337,13 @@ export function packerOf(node, slotName, depth = 0) {
         const field = out ? (out.label || out.localized_name || out.name) : "";
         const outer = field ? packerOf(origin, "in", depth + 1) : null;
         if (!outer) return null;
-        const carrier = outer.inputs[outer.names.indexOf(field)];
+        // Line i names the value on in_i, the LAST line winning when a
+        // name is listed twice -- find the carrier by its number, not by
+        // its position among the connected inputs.
+        const at = outer.names.lastIndexOf(field);
+        const carrier = at >= 0
+            ? (outer.node.inputs ?? []).find((i) => i.name === `in_${at + 1}`)
+            : null;
         return carrier ? packerOf(outer.node, carrier.name, depth + 1) : null;
     }
     const inputs = (origin.inputs ?? []).filter(
@@ -493,7 +499,12 @@ export function staticOutput(node, slot, depth = 0) {
             }
         }
         const packer = packerOf(node, "in");
-        const carrier = packer?.inputs[packer.names.indexOf(field)];
+        // Line i names the value on in_i (the last line winning on
+        // duplicates): find the carrier by its number.
+        const at = packer ? packer.names.lastIndexOf(field) : -1;
+        const carrier = at >= 0
+            ? (packer.node.inputs ?? []).find((i) => i.name === `in_${at + 1}`)
+            : null;
         return carrier ? staticInput(packer.node, carrier.name, depth + 1) : undefined;
     }
     const branches = switchInputs(node, slot, depth);
@@ -574,11 +585,6 @@ export function switchInputs(node, slot = 0, depth = 0) {
 // case for any wiring this change cannot model is therefore today's
 // behaviour, never a silently empty input.
 
-/** Is this output a whole bundle on one wire? */
-function isBundleWire(origin, slot) {
-    return origin?.outputs?.[slot]?.type === BUNDLE_TYPE;
-}
-
 /**
  * THE CACHE FIX. What one Unbundle output is, as a prompt reference: the
  * node and output slot its field's value really comes from.
@@ -587,14 +593,21 @@ function isBundleWire(origin, slot) {
  * of this output. The answer points THROUGH the Unbundle at the Bundle's
  * own input source, named by the field this output carries; the frontend
  * keeps resolving from there on its own (reroutes, bypassed and muted
- * nodes, subgraph instances, KJ Set/Get), which keeps every hop's
- * semantics the core's own. Undefined when the field cannot be had: a
- * spare socket, a name that is no longer in the bundle, a muted or
- * bypassed packer, or a field that carries a whole nested bundle (that
- * is not one link; an Unbundle reads a nested bundle through packerOf
- * instead). The consumer's input is then simply absent from the prompt,
- * which is the server's own None for an unconnected field -- and its
- * message names the input when one was required.
+ * nodes, virtual nodes -- a further Unbundle included, KJ Set/Get),
+ * which keeps every hop's semantics the core's own. A field that carries
+ * a whole nested bundle answers the wire that inner bundle came in on:
+ * whoever reads it wants A bundle, and that wire is exactly where the
+ * value is had -- a Bundle's output, a Value Presets node, another
+ * Unbundle.
+ *
+ * Undefined when the field cannot be had: a spare socket, a name that is
+ * no longer in the bundle, a muted or bypassed packer, an unwired
+ * field input (unpacks as None), or a trace that would reach through a
+ * subgraph used more than once -- see singleCopy. The consumer's input
+ * is then simply absent from the prompt; unbundleIsVirtual reads the
+ * same answers first and keeps the whole node real when any wired
+ * output would come up empty, so reaching undefined here means the
+ * server unpacks exactly as it always did.
  */
 export function resolveUnbundleOutput(node, slot) {
     const out = node?.outputs?.[slot];
@@ -612,56 +625,87 @@ export function resolveUnbundleOutput(node, slot) {
             || packer.node.mode === MODE_BYPASS) {
         return undefined;
     }
+    // A Bundle packed inside a subgraph the graph uses more than once:
+    // its field wiring is the definition's, shared by every copy, so an
+    // answer read off it would hand every copy the first copy's values.
+    if (!singleCopy(packer.node)) return undefined;
     // The last line wins, because that is what the server's pack does
     // when a name is listed twice (packed[name] is overwritten going
     // down the list).
     let at = packer.names.lastIndexOf(field);
-    if (at < 0) {
+    let carrier = null;
+    if (at >= 0) {
+        // Line i names the value on in_i -- BY NUMBER, wired or not, so
+        // the input is found by name, not by its position among the
+        // connected ones (a gap would shift every later field onto the
+        // wrong wire).
+        carrier = (packer.node.inputs ?? [])
+            .find((i) => i.name === `in_${at + 1}`) ?? null;
+    } else {
         // The names list not written yet (or cleared): fall back to what
         // the wires derive right now, so a queue straight after a load
-        // still resolves.
+        // still resolves. The derived names run over the connected
+        // in_N sockets in order, so the same filtered list lines up
+        // with them by position.
         at = derivedNames(packer.node, "in_", false).lastIndexOf(field);
+        if (at >= 0) {
+            carrier = (packer.node.inputs ?? []).filter(
+                (i) => /^in_\d+$/.test(i.name) && i.link != null)[at] ?? null;
+        }
     }
-    if (at < 0 || at >= packer.inputs.length) return undefined;
-    const carrier = packer.inputs[at];
-    if (carrier?.link == null) return undefined;   // unpacks as None
+    if (!carrier || carrier.link == null) return undefined; // unpacks as None
     const graph = packer.node.graph;
     const link = linkById(graph, carrier.link);
     if (!link) return undefined;
-    // The field is fed THROUGH the subgraph's input boundary (the Bundle
+    // The field is fed THROUGH a subgraph's input boundary (the Bundle
     // lives inside a subgraph and this field arrives from outside it):
-    // continue at the instance node's own input, which is where the wire
-    // really enters. The boundary node is not in the prompt and is not in
-    // the resolver's node map, so an answer pointing at it would abort
-    // the whole prompt build -- the same walk bundleSourceFor uses for
-    // the bundle wire itself.
+    // climb OUT through every boundary the wire crosses -- a value may
+    // pass through several nested subgraphs -- until it starts at an
+    // ordinary node. Each hop maps the boundary slot onto the instance's
+    // input of the same index. A boundary node is not in the prompt and
+    // is not in the resolver's node map, so an answer pointing at one
+    // would abort the whole prompt build -- the same walk
+    // bundleSourceFor uses for the bundle wire itself. A graph with
+    // several instances (or none) cannot tell which copy is resolving
+    // and refuses, which leaves the whole node real.
     if (fromBoundary(graph, link)) {
-        const instance = instanceOf(graph);
-        const outer = instance?.inputs?.[link.origin_slot];
-        const outerLink = outer
-            ? linkById(instance.graph, outer.link) : null;
-        const outerOrigin = outerLink
-            ? instance.graph.getNodeById?.(outerLink.origin_id) : null;
-        if (!outerOrigin || isUnbundle(outerOrigin)
-                || isBundleWire(outerOrigin, outerLink.origin_slot)) {
-            return undefined;
+        let instance = instanceOf(graph);
+        let outerSlot = link.origin_slot;
+        for (let hops = 0; instance && hops < 8; hops++) {
+            const outerInput = instance.inputs?.[outerSlot];
+            const outerLink = outerInput
+                ? linkById(instance.graph, outerInput.link) : null;
+            if (!outerLink) return undefined;
+            if (fromBoundary(instance.graph, outerLink)) {
+                outerSlot = outerLink.origin_slot;
+                instance = instanceOf(instance.graph);
+                continue;
+            }
+            const outerOrigin = instance.graph
+                .getNodeById?.(outerLink.origin_id);
+            if (!outerOrigin || !singleCopy(outerOrigin)) return undefined;
+            return { node: outerOrigin, slot: outerLink.origin_slot };
         }
-        return { node: outerOrigin, slot: outerLink.origin_slot };
+        return undefined;
     }
     const origin = graph.getNodeById?.(link.origin_id);
-    if (!origin) return undefined;
-    // A field that carries a whole nested bundle has no single source
-    // link either.
-    if (isBundleWire(origin, link.origin_slot)) return undefined;
-    // Anything else answers as-is -- including a Reroute, which the
-    // frontend itself steps through.
+    if (!origin || !singleCopy(origin)) return undefined;
+    // Anything else answers as-is -- a Reroute, a virtual Unbundle the
+    // frontend keeps resolving through, a whole nested bundle on the
+    // wire, whatever packs or carries the value: every hop's semantics
+    // stay the core's own.
     return { node: origin, slot: link.origin_slot };
 }
 
 /**
- * Whether this Unbundle can answer its outputs from the front end at
- * all: true only when its bundle traces, through everything
- * bundleSourceFor follows, to a Bundle this file can read fields off.
+ * Whether this Unbundle can be left out of the prompt entirely: true
+ * only when its bundle traces, through everything bundleSourceFor
+ * follows, to a Bundle this file can read fields off, the packer is not
+ * muted or bypassed, AND every output anything is wired to resolves to
+ * a real prompt node (resolveUnbundleOutput). One output it cannot
+ * answer -- a field it cannot read, a muted packer, a subgraph copy it
+ * must not reach through -- and the node stays real, so the server
+ * unpacks, validates and errors exactly as it always did.
  *
  * This is the safety half of the change. Installed as a GETTER on
  * isVirtualNode rather than a flag, because the right answer depends on
@@ -671,7 +715,25 @@ export function resolveUnbundleOutput(node, slot) {
  */
 export function unbundleIsVirtual(node) {
     try {
-        return !!packerOf(node, "in");
+        const packer = packerOf(node, "in");
+        if (!packer) return false;
+        // A muted or bypassed packer unpacks as the server's own loud
+        // failure; leaving the node real keeps that message.
+        if (packer.node.mode === MODE_NEVER
+                || packer.node.mode === MODE_BYPASS) {
+            return false;
+        }
+        const outputs = node.outputs ?? [];
+        for (let slot = 0; slot < outputs.length; slot++) {
+            const out = outputs[slot];
+            if (!((out?.links?.length ?? 0) > 0 || out?.link != null)) {
+                continue;                       // nothing reads this output
+            }
+            if (resolveUnbundleOutput(node, slot) === undefined) {
+                return false;
+            }
+        }
+        return true;
     } catch (err) {
         // A trace that throws resolves nothing: stay real, and the
         // server unpacks -- the behaviour every graph was built on.
@@ -827,6 +889,29 @@ function instancesOf(sub) {
     };
     walk(root, 0);
     return found;
+}
+
+/**
+ * Whether answering with this node cannot mix up copies of a subgraph.
+ *
+ * Copies of one subgraph share their inner node objects, and the prompt
+ * builder picks the DTO for a virtual answer by object identity -- so an
+ * answer pointing inside a subgraph the graph uses more than once would
+ * hand every copy the first copy's values, silently. True when the node
+ * sits at the root, or every subgraph between it and the root has
+ * exactly one instance; anything else (several copies, or a definition
+ * no instance uses) refuses.
+ */
+function singleCopy(node) {
+    const root = app.graph ?? app.rootGraph;
+    let graph = node?.graph;
+    for (let depth = 0; graph && depth < 8; depth++) {
+        if (graph === root) return true;
+        const instances = instancesOf(graph);
+        if (instances.length !== 1) return false;
+        graph = instances[0].graph;
+    }
+    return false;
 }
 
 /** Is this link coming from the subgraph's own input boundary? */
@@ -1622,17 +1707,19 @@ app.registerExtension({
         const spec = DRIVEN[nodeData.name];
         if (!spec) return;
         // Only the Unbundle carries `trace`. The three hooks below make
-        // it a front-end node WHENEVER its bundle traces back to a Bundle
-        // (unbundleIsVirtual -- see the resolver section above), and a
-        // plain real node everywhere else. `isVirtualNode` is what the
-        // prompt builder reads to skip a node and resolve through it
-        // (resolveVirtualOutput per output); getInputLink must answer
-        // null because it is only reached for a field resolveVirtualOutput
-        // declined -- the base class would follow INPUT slot `slot`
-        // instead, which is meaningless for an output index and would
-        // quietly hand the consumer whatever that finds.
+        // it a front-end node only when its bundle traces back to a
+        // Bundle AND every wired output can be answered from the front
+        // end (unbundleIsVirtual -- see the resolver section above), and
+        // leave a plain real node everywhere else. `isVirtualNode` is
+        // what the prompt builder reads to skip a node and resolve
+        // through it (resolveVirtualOutput per output); getInputLink is
+        // reached on the same through-path for a field
+        // resolveVirtualOutput declined, where the base class would
+        // follow INPUT slot `slot` -- meaningless for an output index --
+        // so a left-out node answers null and a real one delegates.
         if (spec.trace) {
             const proto = nodeType.prototype;
+            const baseGetInputLink = proto.getInputLink;
             Object.defineProperty(proto, "isVirtualNode", {
                 configurable: true,
                 // A getter has no arguments: the node arrives as `this`.
@@ -1647,7 +1734,13 @@ app.registerExtension({
                     return undefined;
                 }
             };
-            proto.getInputLink = function () { return null; };
+            proto.getInputLink = function (slot) {
+                if (!unbundleIsVirtual(this)) {
+                    return baseGetInputLink
+                        ? baseGetInputLink.call(this, slot) : null;
+                }
+                return null;
+            };
         }
         const max = spec.side
             ? poolSize(nodeData, spec.prefix, spec.side)
