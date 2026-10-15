@@ -714,6 +714,35 @@ export function resolveUnbundleOutput(node, slot) {
  * one the frontend already resolved.
  */
 export function unbundleIsVirtual(node) {
+    if (virtualDuringBuild?.has(node)) return virtualDuringBuild.get(node);
+    const answer = isVirtualNow(node);
+    virtualDuringBuild?.set(node, answer);
+    return answer;
+}
+
+// While one prompt is being built the graph holds still, and the builder
+// asks each Unbundle whether it is left out once per node and again per
+// consumer link -- each ask a full trace (packer, every output, types):
+// ~100 ms more for a 200-node workflow. Answered once per build; every
+// ask outside a build is answered live.
+let virtualDuringBuild = null;
+function rememberDuringBuild() {
+    const build = app.graphToPrompt;
+    if (typeof build !== "function" || build.__obvpmVirtualMemo) return;
+    const wrapped = async function (...args) {
+        const outer = virtualDuringBuild;
+        virtualDuringBuild = outer ?? new WeakMap();
+        try {
+            return await build.apply(this, args);
+        } finally {
+            virtualDuringBuild = outer;
+        }
+    };
+    wrapped.__obvpmVirtualMemo = true;
+    app.graphToPrompt = wrapped;
+}
+
+function isVirtualNow(node) {
     try {
         const packer = packerOf(node, "in");
         if (!packer) return false;
@@ -1809,6 +1838,7 @@ app.registerExtension({
         // have to be in place before any node element is created.
         refreshCompactCss();
         installDiagnostic();
+        rememberDuringBuild();
     },
     async beforeRegisterNodeDef(nodeType, nodeData) {
         const spec = DRIVEN[nodeData.name];

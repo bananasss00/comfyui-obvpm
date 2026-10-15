@@ -652,6 +652,28 @@ test("text behind a Reroute on the Bundle's side, into a dropdown: stays real",
     assert.equal(unbundleIsVirtual(unbundle), false);
 });
 
+test("answered once per prompt build, live outside one", async () => {
+    const { g, vaeLoader, unbundle } = packedGraph();
+    const decode = makeNode(g, 126, "VAEDecode",
+        { inputs: [{ name: "vae" }] });
+    wire(g, unbundle, 1, decode, 0);
+    const ext = extensions.find((e) => e.name === "obvpm.dynamic");
+    const seen = [];
+    app.graphToPrompt = async function () {
+        seen.push(unbundleIsVirtual(unbundle));
+        vaeLoader.mode = MODE_NEVER;          // changed mid-build: not seen
+        seen.push(unbundleIsVirtual(unbundle));
+        return {};
+    };
+    ext.setup();
+    await app.graphToPrompt();
+    assert.deepEqual(seen, [true, true], "one answer for the whole build");
+    assert.equal(unbundleIsVirtual(unbundle), false, "live again after it");
+    ext.setup();
+    assert.equal(app.graphToPrompt.__obvpmVirtualMemo, true);
+    vaeLoader.mode = 0;
+});
+
 // ---- the prototype hooks ------------------------------------------------
 
 test("the hooks are installed on the Unbundle prototype only, and gate",
