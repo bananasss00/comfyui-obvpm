@@ -621,10 +621,7 @@ export function resolveUnbundleOutput(node, slot) {
     if (!packer) return undefined;
     // A muted or bypassed packer produces nothing: its getters get
     // nothing, the same loud failure the server-side unpack would raise.
-    if (packer.node.mode === MODE_NEVER
-            || packer.node.mode === MODE_BYPASS) {
-        return undefined;
-    }
+    if (!inPrompt(packer.node)) return undefined;
     // A Bundle packed inside a subgraph the graph uses more than once:
     // its field wiring is the definition's, shared by every copy, so an
     // answer read off it would hand every copy the first copy's values.
@@ -683,13 +680,16 @@ export function resolveUnbundleOutput(node, slot) {
             }
             const outerOrigin = instance.graph
                 .getNodeById?.(outerLink.origin_id);
-            if (!outerOrigin || !singleCopy(outerOrigin)) return undefined;
+            if (!outerOrigin || !singleCopy(outerOrigin)
+                    || !inPrompt(outerOrigin)) {
+                return undefined;
+            }
             return { node: outerOrigin, slot: outerLink.origin_slot };
         }
         return undefined;
     }
     const origin = graph.getNodeById?.(link.origin_id);
-    if (!origin || !singleCopy(origin)) return undefined;
+    if (!origin || !singleCopy(origin) || !inPrompt(origin)) return undefined;
     // Anything else answers as-is -- a Reroute, a virtual Unbundle the
     // frontend keeps resolving through, a whole nested bundle on the
     // wire, whatever packs or carries the value: every hop's semantics
@@ -719,18 +719,20 @@ export function unbundleIsVirtual(node) {
         if (!packer) return false;
         // A muted or bypassed packer unpacks as the server's own loud
         // failure; leaving the node real keeps that message.
-        if (packer.node.mode === MODE_NEVER
-                || packer.node.mode === MODE_BYPASS) {
-            return false;
-        }
+        if (!inPrompt(packer.node)) return false;
         const outputs = node.outputs ?? [];
         for (let slot = 0; slot < outputs.length; slot++) {
             const out = outputs[slot];
             if (!((out?.links?.length ?? 0) > 0 || out?.link != null)) {
                 continue;                       // nothing reads this output
             }
-            if (resolveUnbundleOutput(node, slot) === undefined) {
-                return false;
+            const answer = resolveUnbundleOutput(node, slot);
+            if (answer === undefined) return false;
+            // Left out, the consumer is wired straight to the source, and
+            // the server checks the two types (see serverTakes).
+            const got = sourceType(answer);
+            for (const want of consumerTypes(node, slot)) {
+                if (!serverTakes(got, want)) return false;
             }
         }
         return true;
@@ -912,6 +914,111 @@ function singleCopy(node) {
         graph = instances[0].graph;
     }
     return false;
+}
+
+/**
+ * Whether the prompt builder will have this node: it, and every subgraph
+ * instance around it, neither muted nor bypassed. A muted subgraph's inner
+ * nodes are left out of the prompt, and an answer pointing at one aborts
+ * the WHOLE build ("No DTO found for virtual source node") -- the 010 and
+ * 011 workflows mute a subgraph whose Bundle reaches a live Unbundle
+ * through Set/Get. Refused, the Unbundle stays real and the server unpacks
+ * as it always did.
+ */
+function inPrompt(node) {
+    const root = app.graph ?? app.rootGraph;
+    let n = node;
+    for (let depth = 0; n && depth < 8; depth++) {
+        if (n.mode === MODE_NEVER || n.mode === MODE_BYPASS) return false;
+        const graph = n.graph;
+        if (!graph || graph === root) return true;
+        const instances = instancesOf(graph);
+        if (instances.length !== 1) return false;
+        n = instances[0];
+    }
+    return false;
+}
+
+// A type the frontend cannot vouch for: whatever it is, only "*" takes it.
+const UNKNOWN_TYPE = Symbol("unknown type");
+
+/**
+ * Whether the server takes a wire from a `got` output into a `want` input
+ * (comfy_execution/validation.py validate_node_input): the same type, "*"
+ * on either side, or a type shared by comma-separated lists. A dropdown --
+ * its options list, or COMBO -- is COMBO. A real Unbundle's outputs are
+ * "*", so text into a dropdown or INT into FLOAT passes through it today;
+ * wired straight, the server refuses both ("Return type mismatch").
+ * An untyped slot has nothing to check against.
+ */
+function serverTakes(got, want) {
+    if (got === UNKNOWN_TYPE || want === UNKNOWN_TYPE) {
+        return got === "*" || want === "*";
+    }
+    const norm = (t) => (Array.isArray(t) ? "COMBO" : t == null ? "" : String(t));
+    const g = norm(got), w = norm(want);
+    if (!g || !w || g === w) return true;
+    const gs = g.split(",").map((t) => t.trim());
+    const ws = new Set(w.split(",").map((t) => t.trim()));
+    if (gs.includes("*") || ws.has("*")) return true;
+    return gs.some((t) => ws.has(t));
+}
+
+/**
+ * The type the server will see for a resolver answer: followed through
+ * every node the prompt builder resolves through (a Reroute, a KJ Get,
+ * another left-out Unbundle) to the real node at the end, whose declared
+ * output it is. A subgraph instance's output stands for its inner one.
+ */
+function sourceType(answer) {
+    let node = answer?.node, slot = answer?.slot;
+    for (let hops = 0; node && hops < 16; hops++) {
+        if (!node.isVirtualNode || node.isSubgraphNode?.()) {
+            return node.outputs?.[slot]?.type;
+        }
+        const next = node.resolveVirtualOutput?.(slot);
+        if (next?.node) {
+            node = next.node;
+            slot = next.slot;
+            continue;
+        }
+        // a pass-through virtual node (a Reroute): where its input comes from
+        const link = node.getInputLink?.(slot);
+        const origin = link ? node.graph?.getNodeById?.(link.origin_id) : null;
+        if (!origin) return UNKNOWN_TYPE;
+        node = origin;
+        slot = link.origin_slot;
+    }
+    return UNKNOWN_TYPE;
+}
+
+/**
+ * The input types an Unbundle output lands in, the way the server will see
+ * them: through legacy Reroutes to the real inputs. An Unbundle reading a
+ * nested bundle is skipped -- it checks its own outputs; anything else the
+ * value goes on through (a KJ Set, a subgraph's output) is a type this
+ * cannot vouch for.
+ */
+function consumerTypes(node, slot, found = [], depth = 0) {
+    for (const id of node.outputs?.[slot]?.links ?? []) {
+        const link = linkById(node.graph, id);
+        if (!link) continue;
+        const target = node.graph?.getNodeById?.(link.target_id);
+        if (!target || target === node.graph?.outputNode) {
+            found.push(UNKNOWN_TYPE);
+        } else if (isUnbundle(target)) {
+            continue;
+        } else if (target.isVirtualNode && !target.isSubgraphNode?.()) {
+            if (target.type === "Reroute" && depth < 8) {
+                consumerTypes(target, 0, found, depth + 1);
+            } else {
+                found.push(UNKNOWN_TYPE);
+            }
+        } else {
+            found.push(target.inputs?.[link.target_slot]?.type);
+        }
+    }
+    return found;
 }
 
 /** Is this link coming from the subgraph's own input boundary? */

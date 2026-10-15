@@ -537,6 +537,121 @@ test("a value crossing TWO subgraph boundaries resolves to its source", () => {
               "the climb goes out through both boundaries");
 });
 
+// ---- what the prompt builder will have ------------------------------------
+
+test("a Bundle inside a muted subgraph: stays real (the 011 upscale VAEs)",
+     () => {
+    // The subgraph is muted while not upscaling, so its inner nodes are
+    // not in the prompt; an answer pointing at one aborted the WHOLE
+    // build ("No DTO found for virtual source node").
+    const { g } = packedGraph();
+    const sub = makeGraph("sub muted");
+    sub.outputNode.inputs = [{ name: "pass" }];
+    const innerBundle = makeBundle(sub, 120, "vae", 1);
+    const innerLoader = makeNode(sub, 121, "VAELoader",
+        { outputs: [{ name: "VAE", type: "VAE" }] });
+    wire(sub, innerLoader, 0, innerBundle, 0);
+    wire(sub, innerBundle, 0, sub.outputNode, 0);
+    const inst = makeNode(g, 122, "SubgraphNode", {
+        outputs: [{ name: "out0", type: "OBVPM_BUNDLE" }],
+        subgraph: sub, mode: MODE_NEVER,
+    });
+    inst.isSubgraphNode = () => true;
+    const unbundle = makeUnbundle(g, 123, outs(["vae"]));
+    wire(g, inst, 0, unbundle, 0);
+    const decode = makeNode(g, 124, "VAEDecode",
+        { inputs: [{ name: "vae", type: "VAE" }] });
+    wire(g, unbundle, 0, decode, 0);
+    assert.equal(resolveUnbundleOutput(unbundle, 0), undefined);
+    assert.equal(unbundleIsVirtual(unbundle), false);
+    inst.mode = 0;
+    assert.equal(unbundleIsVirtual(unbundle), true,
+                 "the same wiring, the subgraph live: left out");
+});
+
+test("a field whose source is muted: stays real", () => {
+    const { g, vaeLoader, unbundle } = packedGraph();
+    const decode = makeNode(g, 125, "VAEDecode",
+        { inputs: [{ name: "vae" }] });
+    wire(g, unbundle, 1, decode, 0);
+    vaeLoader.mode = MODE_NEVER;
+    assert.equal(unbundleIsVirtual(unbundle), false);
+});
+
+// ---- the server's type check --------------------------------------------
+// A real Unbundle's outputs are "*", which the server lets into any input;
+// left out, the consumer is wired straight to the source and the server
+// compares the two types (validate_node_input).
+
+function typedGraph(sourceType, consumerType) {
+    const g = makeGraph("root");
+    app.rootGraph = g;
+    const src = makeNode(g, 1, "Source",
+        { outputs: [{ name: "v", type: sourceType }] });
+    const bundle = makeBundle(g, 2, "v", 1);
+    wire(g, src, 0, bundle, 0);
+    const unbundle = makeUnbundle(g, 3, outs(["v"]));
+    wire(g, bundle, 0, unbundle, 0);
+    const consumer = makeNode(g, 4, "Consumer",
+        { inputs: [{ name: "x", type: consumerType }] });
+    return { g, src, bundle, unbundle, consumer };
+}
+
+test("text into a dropdown: stays real (the server refuses STRING -> COMBO)",
+     () => {
+    const { g, unbundle, consumer } = typedGraph("STRING", "COMBO");
+    wire(g, unbundle, 0, consumer, 0);
+    assert.equal(unbundleIsVirtual(unbundle), false);
+});
+
+test("INT into FLOAT: stays real", () => {
+    const { g, unbundle, consumer } = typedGraph("INT", "FLOAT");
+    wire(g, unbundle, 0, consumer, 0);
+    assert.equal(unbundleIsVirtual(unbundle), false);
+});
+
+test("matching types, '*', and a shared listed type: left out", () => {
+    for (const [got, want] of [["STRING", "STRING"], ["IMAGE", "*"],
+                               ["*", "COMBO"], ["INT", "INT,FLOAT"]]) {
+        const { g, unbundle, consumer } = typedGraph(got, want);
+        wire(g, unbundle, 0, consumer, 0);
+        assert.equal(unbundleIsVirtual(unbundle), true, `${got} -> ${want}`);
+    }
+});
+
+test("through a Reroute into a dropdown: stays real", () => {
+    const { g, unbundle, consumer } = typedGraph("STRING", "COMBO");
+    const reroute = makeNode(g, 5, "Reroute", {
+        inputs: [{ name: "", type: "*" }],
+        outputs: [{ name: "", type: "*" }], virtual: true,
+    });
+    wire(g, unbundle, 0, reroute, 0);
+    wire(g, reroute, 0, consumer, 0);
+    assert.equal(unbundleIsVirtual(unbundle), false);
+});
+
+test("text behind a Reroute on the Bundle's side, into a dropdown: stays real",
+     () => {
+    const g = makeGraph("root");
+    app.rootGraph = g;
+    const src = makeNode(g, 1, "Source",
+        { outputs: [{ name: "v", type: "STRING" }] });
+    const reroute = makeNode(g, 2, "Reroute", {
+        inputs: [{ name: "", type: "*" }],
+        outputs: [{ name: "", type: "*" }], virtual: true,
+    });
+    reroute.getInputLink = () => g.links.get(reroute.inputs[0].link);
+    wire(g, src, 0, reroute, 0);
+    const bundle = makeBundle(g, 3, "v", 1);
+    wire(g, reroute, 0, bundle, 0);
+    const unbundle = makeUnbundle(g, 4, outs(["v"]));
+    wire(g, bundle, 0, unbundle, 0);
+    const consumer = makeNode(g, 5, "Consumer",
+        { inputs: [{ name: "x", type: "COMBO" }] });
+    wire(g, unbundle, 0, consumer, 0);
+    assert.equal(unbundleIsVirtual(unbundle), false);
+});
+
 // ---- the prototype hooks ------------------------------------------------
 
 test("the hooks are installed on the Unbundle prototype only, and gate",
